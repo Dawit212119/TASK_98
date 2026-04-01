@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-carereserve}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-carereserve}
+      POSTGRES_DB: ${DB_NAME:-carereserve}
+    # Postgres is only needed by the app service on the compose network.
+    # Keep host port publishing optional to avoid collisions on developer machines.
+    ports:
+      - "${DB_HOST_PORT:-}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-carereserve} -d ${DB_NAME:-carereserve}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: ${PORT:-3000}
+      API_PREFIX: ${API_PREFIX:-api/v1}
+      DB_HOST: postgres
+      DB_PORT: ${DB_PORT:-5432}
+      DB_USERNAME: ${DB_USERNAME:-carereserve}
+      DB_PASSWORD: ${DB_PASSWORD:-carereserve}
+      DB_NAME: ${DB_NAME:-carereserve}
+      # Use project-scoped override names so unrelated host JWT_SECRET
+      # values do not break local startup.
+      JWT_SECRET: ${APP_JWT_SECRET:-LocalDevJwtSecret_ChangeBeforeProd_32+}
+      JWT_EXPIRES_IN_SECONDS: ${JWT_EXPIRES_IN_SECONDS:-3600}
+      RESET_TOKEN_EXPIRES_IN_MINUTES: ${RESET_TOKEN_EXPIRES_IN_MINUTES:-15}
+      UPLOAD_DIR: ${UPLOAD_DIR:-/usr/src/app/uploads}
+      SENSITIVE_WORDS: ${SENSITIVE_WORDS:-}
+      IDENTITY_DOC_ENCRYPTION_KEY: ${APP_IDENTITY_DOC_ENCRYPTION_KEY:-LocalDevIdentityDocKey_ChangeBeforeProd_32+}
+      BUSINESS_TZ: ${BUSINESS_TZ:-UTC}
+      BUSINESS_DAY_START_HOUR: ${BUSINESS_DAY_START_HOUR:-9}
+      BUSINESS_DAY_END_HOUR: ${BUSINESS_DAY_END_HOUR:-17}
+      BUSINESS_WORK_DAYS: ${BUSINESS_WORK_DAYS:-1,2,3,4,5}
+      WORKFLOW_SLA_USE_CLOCK_HOURS: ${WORKFLOW_SLA_USE_CLOCK_HOURS:-false}
+      WORKFLOW_REMINDER_LEAD_HOURS: ${WORKFLOW_REMINDER_LEAD_HOURS:-2}
+      AUDIT_RETENTION_YEARS: ${AUDIT_RETENTION_YEARS:-7}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3001:3000"
+
+volumes:
+  pgdata:

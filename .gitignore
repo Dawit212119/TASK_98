@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+coverage/
+npm-debug.log*
+.api-test-tmp*/
+
+# Excluded from GitHub push (per project policy)
+convert_ai_session.py
+session.json
+e6c5dd6c-d4eb-4807-a421-91a486f01662.jsonl
