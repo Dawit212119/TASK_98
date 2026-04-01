@@ -139,9 +139,16 @@ fi
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 # 1) Health (fail fast with a clear message if nothing is listening — avoids status=000 and cat of missing -o file)
+# Prefer Node fetch: on Windows, npm-spawned Git Bash often lacks a working curl on PATH while Node works (same as perf-check.js).
 BODY_FILE="$TMP_DIR/health.json"
 : >"$BODY_FILE"
-STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" --connect-timeout 3 --max-time 15 "$API_BASE_URL/health" 2>/dev/null || true)"
+STATUS=""
+if [[ -n "$NODE_BIN" ]] && [[ -f "$REPO_ROOT/scripts/http-get-one.mjs" ]]; then
+  STATUS="$("$NODE_BIN" "$REPO_ROOT/scripts/http-get-one.mjs" "$API_BASE_URL/health" "$BODY_FILE" 2>/dev/null || true)"
+fi
+if [[ -z "$STATUS" ]] || [[ "$STATUS" == "0" ]]; then
+  STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" --connect-timeout 3 --max-time 15 "$API_BASE_URL/health" 2>/dev/null || true)"
+fi
 BODY="$(cat "$BODY_FILE" 2>/dev/null || true)"
 if [[ "$STATUS" != "200" ]]; then
   echo "ERROR: The API is not reachable or unhealthy at $API_BASE_URL"
