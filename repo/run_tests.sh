@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -u
 
+# Always run from this script's directory (repo root). CI often invokes tests without a prior cd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || exit 1
+
+# Unit tests need devDependencies (jest, ts-jest). Docker image builds deps inside the container only;
+# host-side test runners must install here. Without this, `npx jest` may fetch a standalone Jest that
+# cannot resolve ts-jest from this package.
+if [[ "${RUN_TESTS_SKIP_NPM_CI:-}" != "1" ]]; then
+  if [[ ! -f node_modules/jest/bin/jest.js ]] || [[ ! -f node_modules/ts-jest/package.json ]]; then
+    echo "Unit tests require devDependencies — running npm ci in $(pwd) ..."
+    npm ci
+  fi
+fi
+
 TOTAL=0
 PASSED=0
 FAILED=0

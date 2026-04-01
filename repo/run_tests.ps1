@@ -2,6 +2,16 @@ param(
   [switch]$ApiOnly
 )
 
+Set-Location $PSScriptRoot
+
+if ($env:RUN_TESTS_SKIP_NPM_CI -ne "1") {
+  if (-not (Test-Path "node_modules/jest/bin/jest.js") -or -not (Test-Path "node_modules/ts-jest/package.json")) {
+    Write-Host "Unit tests require devDependencies — running npm ci..."
+    npm ci
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  }
+}
+
 $total = 0
 $passed = 0
 $failed = 0
@@ -16,7 +26,14 @@ function Run-Suite {
   Write-Host ""
   Write-Host "=== Running $Name ==="
 
-  bash -lc $Command
+  # Git Bash -lc often starts in $HOME; force repo root so npm/jest see node_modules.
+  $repo = $PSScriptRoot -replace '\\', '/'
+  if ($repo -match '^([A-Za-z]):') {
+    $drive = $Matches[1].ToLower()
+    $rest = $repo.Substring(2)
+    $repo = "/$drive$rest"
+  }
+  bash -lc "cd '$repo' && $Command"
   if ($LASTEXITCODE -eq 0) {
     $script:passed++
     Write-Host "[PASS] $Name"

@@ -9,7 +9,7 @@
     "start": "node dist/main",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
-    "test:unit": "npx jest --config jest.unit.config.js --runInBand",
+    "test:unit": "node ./node_modules/jest/bin/jest.js --config jest.unit.config.js --runInBand",
     "test:api": "bash API_tests/run_api_tests.sh",
     "test:perf": "node scripts/perf-check.js",
     "test:api:ps": "powershell -ExecutionPolicy Bypass -File run_tests.ps1 -ApiOnly",
