@@ -22,6 +22,7 @@ import { AccessControlService } from './access-control.service';
 import { CreateRoleDto } from './dto/create-role.dto';
 import { ProvisionUserDto } from './dto/provision-user.dto';
 import { ReplaceUserRolesDto } from './dto/replace-user-roles.dto';
+import { ReplaceUserScopesDto } from './dto/replace-user-scopes.dto';
 
 @Controller('access')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -73,6 +74,37 @@ export class AccessControlController {
     @Body() payload: ReplaceUserRolesDto
   ): Promise<{ user_id: string; role_ids: string[] }> {
     return this.accessControlService.replaceUserRoles(user.userId, userId, payload.role_ids);
+  }
+
+  @Get('scopes')
+  @RequirePermissions('access.scopes.read')
+  @HttpCode(HttpStatus.OK)
+  listDataScopes(
+    @CurrentUser() user: AuthenticatedUser
+  ): Promise<{ items: Array<{ id: string; scope_type: string; scope_key: string; description: string | null }> }> {
+    return this.accessControlService.listDataScopes(user.userId);
+  }
+
+  @Get('users/:user_id/scopes')
+  @RequirePermissions('access.scopes.read')
+  @HttpCode(HttpStatus.OK)
+  getUserDataScopes(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('user_id') userId: string
+  ): Promise<{ user_id: string; items: Array<{ id: string; scope_type: string; scope_key: string; description: string | null }> }> {
+    return this.accessControlService.getUserDataScopes(user.userId, userId);
+  }
+
+  @Put('users/:user_id/scopes')
+  @RequirePermissions('access.scopes.write')
+  @Idempotent()
+  @HttpCode(HttpStatus.OK)
+  replaceUserDataScopes(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('user_id') userId: string,
+    @Body() payload: ReplaceUserScopesDto
+  ): Promise<{ user_id: string; scope_ids: string[] }> {
+    return this.accessControlService.replaceUserDataScopes(user.userId, userId, payload.scope_ids);
   }
 
   /** Register before `audit-logs` so nested static path is not shadowed by routing order. */

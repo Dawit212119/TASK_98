@@ -503,7 +503,7 @@ STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -G "$API_BASE_URL/reservati
   --data-urlencode "page_size=20" \
   -H "Authorization: Bearer $MERCHANT_TOKEN")"
 BODY="$(cat "$BODY_FILE")"
-assert_case "merchant cannot list reservations" "$STATUS" "403" "$BODY" "RESERVATION_LIST_FORBIDDEN"
+assert_case "merchant list reservations succeeds (clinic scope-filtered)" "$STATUS" "200" "$BODY" "items"
 
 BODY_FILE="$TMP_DIR/followup_ingest_merchant_ok.json"
 STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/follow-up/tags/ingest" \
@@ -1480,16 +1480,34 @@ BODY="$(cat "$BODY_FILE")"
 assert_case "create analytics experiment" "$STATUS" "201" "$BODY" "experiment_id"
 ANALYTICS_EXPERIMENT_ID="$("$NODE_BIN" -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(d.experiment_id||'');" < "$BODY_FILE")"
 
+BODY_FILE="$TMP_DIR/analytics_event_patient_forbidden.json"
+STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/analytics/events" \
+  -H "Authorization: Bearer $PATIENT1_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: analytics-event-$SUFFIX-patient-blocked" \
+  -d "{\"event_type\":\"impression\",\"subject_type\":\"article\",\"subject_id\":\"$RESERVATION_ID\",\"occurred_at\":\"2026-04-10T10:00:00.000Z\",\"metadata\":{\"source\":\"api-test\"}}")"
+BODY="$(cat "$BODY_FILE")"
+assert_case "analytics ingest forbidden for patient" "$STATUS" "403" "$BODY" "FORBIDDEN"
+
 for event_type in impression click read_completion share; do
   BODY_FILE="$TMP_DIR/analytics_event_$event_type.json"
   STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/analytics/events" \
-    -H "Authorization: Bearer $PATIENT1_TOKEN" \
+    -H "Authorization: Bearer $ANALYTICS_TOKEN" \
     -H "Content-Type: application/json" \
     -H "Idempotency-Key: analytics-event-$SUFFIX-$event_type" \
     -d "{\"event_type\":\"$event_type\",\"subject_type\":\"article\",\"subject_id\":\"$RESERVATION_ID\",\"occurred_at\":\"2026-04-10T10:00:00.000Z\",\"metadata\":{\"source\":\"api-test\"}}")"
   BODY="$(cat "$BODY_FILE")"
-  assert_case "analytics ingest event $event_type" "$STATUS" "201" "$BODY" "event_id"
+  assert_case "analytics_viewer ingest event $event_type" "$STATUS" "201" "$BODY" "event_id"
 done
+
+BODY_FILE="$TMP_DIR/analytics_event_ops_impression.json"
+STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/analytics/events" \
+  -H "Authorization: Bearer $OPS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: analytics-event-$SUFFIX-ops-impression" \
+  -d "{\"event_type\":\"impression\",\"subject_type\":\"article\",\"subject_id\":\"$RESERVATION_ID\",\"occurred_at\":\"2026-04-10T10:05:00.000Z\",\"metadata\":{\"source\":\"api-test-ops\"}}")"
+BODY="$(cat "$BODY_FILE")"
+assert_case "ops_admin ingest analytics event" "$STATUS" "201" "$BODY" "event_id"
 
 BODY_FILE="$TMP_DIR/analytics_content_quality.json"
 STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -G "$API_BASE_URL/analytics/aggregations/content-quality" \

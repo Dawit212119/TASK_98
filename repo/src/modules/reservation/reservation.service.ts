@@ -98,8 +98,8 @@ export class ReservationService {
    * - staff: full clinic operational list; optional query filters apply.
    * - ops_admin: same as staff — full list with filters for admin operations.
    * - provider: only rows where provider_id = caller; if also patient, (patient_id = caller OR provider_id = caller).
-   * - merchant: no merchant_id on reservations schema → list forbidden (403).
-   * - analytics_viewer: this route is not an analytics reporting API → list forbidden unless caller also has patient/staff/provider/ops_admin.
+   * - merchant: same clinic scope filter as staff (reservation_data_scopes); must have assigned data scopes.
+   * - analytics_viewer: this route is not an analytics reporting API → list forbidden unless caller also has patient/staff/provider/ops_admin/merchant.
    */
   async listReservations(userId: string, query: ReservationListQueryDto): Promise<Record<string, unknown>> {
     const roles = await this.scopePolicyService.getRoles(userId);
@@ -113,22 +113,16 @@ export class ReservationService {
     const mayListClinicWide = hasOpsAdmin || hasStaff;
     const mayListAsProvider = hasProvider;
     const mayListAsPatient = hasPatient;
-
-    if (hasMerchant && !mayListClinicWide && !mayListAsProvider && !mayListAsPatient) {
-      throw new AppException(
-        'RESERVATION_LIST_FORBIDDEN',
-        'Listing reservations is not permitted for this role',
-        {},
-        403
-      );
-    }
+    // Merchants see reservations scoped to their assigned clinics (same scope filter as staff).
+    const mayListAsMerchant = hasMerchant;
 
     if (
       hasAnalyticsViewer &&
       !hasOpsAdmin &&
       !hasStaff &&
       !hasProvider &&
-      !hasPatient
+      !hasPatient &&
+      !hasMerchant
     ) {
       throw new AppException(
         'RESERVATION_LIST_FORBIDDEN',
@@ -138,7 +132,7 @@ export class ReservationService {
       );
     }
 
-    if (!mayListClinicWide && !mayListAsProvider && !mayListAsPatient) {
+    if (!mayListClinicWide && !mayListAsProvider && !mayListAsPatient && !mayListAsMerchant) {
       throw new AppException(
         'RESERVATION_LIST_FORBIDDEN',
         'Listing reservations is not permitted for this role',

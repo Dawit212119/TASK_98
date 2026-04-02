@@ -14,7 +14,11 @@ import {
 
 export enum SyncEntityType {
   RESERVATION = 'reservation',
-  NOTIFICATION = 'notification'
+  NOTIFICATION = 'notification',
+  MESSAGE = 'message',
+  FOLLOW_UP_TASK = 'follow_up_task',
+  WORKFLOW_REQUEST = 'workflow_request',
+  REVIEW = 'review'
 }
 
 export enum SyncOperation {

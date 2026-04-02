@@ -89,9 +89,21 @@ describe('TrustRatingService appeals and privileged read audits', () => {
 
   const buildCreditTierContext = () => {
     const accessControlService = { getUserRoleNames: jest.fn() };
-    const scopePolicyService = {};
+    // scopePolicyService needs getUserScopeIds for the staff scope-check path.
+    const scopePolicyService = {
+      getUserScopeIds: jest.fn().mockResolvedValue(['scope-1'])
+    };
     const auditService = { appendLog: jest.fn().mockResolvedValue({}) };
-    const reservationRepository = {};
+    // reservationRepository needs createQueryBuilder for the staff in-scope query.
+    const reservationQb: any = {
+      innerJoin: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getCount: jest.fn().mockResolvedValue(1)   // ≥1 means staff is in scope
+    };
+    const reservationRepository = {
+      createQueryBuilder: jest.fn(() => reservationQb)
+    };
     const transitionRepository = {};
     const reviewRepository = {};
     const reviewAppealRepository = {};

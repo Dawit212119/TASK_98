@@ -24,6 +24,7 @@ export class AnalyticsController {
   constructor(private readonly analyticsService: AnalyticsService) {}
 
   @Post('events')
+  @RequirePermissions('analytics.api.use')
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   ingestEvent(@CurrentUser() user: AuthenticatedUser, @Body() payload: IngestEventDto): Promise<Record<string, unknown>> {

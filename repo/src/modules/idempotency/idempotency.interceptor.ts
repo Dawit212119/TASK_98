@@ -43,8 +43,11 @@ export class IdempotencyInterceptor implements NestInterceptor {
 
     const endpoint = `${request.method}:${request.originalUrl.split('?')[0]}`;
     const requestHash = createHash('sha256').update(JSON.stringify(request.body ?? {})).digest('hex');
+    // Bind idempotency records to the authenticated actor so one user cannot replay
+    // another user's cached response using the same key+endpoint pair.
+    const actorUserId = (request as RequestWithContext).user?.userId ?? null;
 
-    return from(this.idempotencyService.findByKeyAndEndpoint(idempotencyKey, endpoint)).pipe(
+    return from(this.idempotencyService.findByKeyEndpointAndActor(idempotencyKey, endpoint, actorUserId)).pipe(
       switchMap((existing) => {
         if (existing) {
           if (existing.requestHash && existing.requestHash !== requestHash) {
@@ -70,6 +73,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
               this.idempotencyService.saveResult({
                 key: idempotencyKey,
                 endpoint,
+                actorUserId,
                 requestHash,
                 responseStatus: response.statusCode,
                 responseBody: handlerResponse

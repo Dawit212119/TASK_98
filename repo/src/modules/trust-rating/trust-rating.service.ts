@@ -238,9 +238,37 @@ export class TrustRatingService {
 
   async getCreditTier(userId: string, targetUserId: string): Promise<Record<string, unknown>> {
     const roles = await this.accessControlService.getUserRoleNames(userId);
-    const canRead = targetUserId === userId || roles.includes('ops_admin') || roles.includes('staff');
-    if (!canRead) {
+    const isSelf = targetUserId === userId;
+    const isOpsAdmin = roles.includes('ops_admin');
+    const isStaff = roles.includes('staff');
+
+    if (!isSelf && !isOpsAdmin && !isStaff) {
       throw new AppException('FORBIDDEN', 'Insufficient permissions', {}, 403);
+    }
+
+    // Staff must have a clinic-scope relationship with the target user (shared reservation in scope).
+    if (isStaff && !isOpsAdmin && !isSelf) {
+      const scopeIds = await this.scopePolicyService.getUserScopeIds(userId);
+      if (scopeIds.length === 0) {
+        throw new AppException('FORBIDDEN', 'Staff has no assigned data scopes', {}, 403);
+      }
+
+      // Count reservations where the target is the patient AND the reservation is in the staff's scope.
+      const inScopeCount = await this.reservationRepository
+        .createQueryBuilder('r')
+        .innerJoin(
+          'reservation_data_scopes',
+          'rds',
+          'rds.reservation_id = r.id AND rds.deleted_at IS NULL'
+        )
+        .where('r.patient_id = :targetUserId', { targetUserId })
+        .andWhere('r.deleted_at IS NULL')
+        .andWhere('rds.scope_id IN (:...scopeIds)', { scopeIds })
+        .getCount();
+
+      if (inScopeCount === 0) {
+        throw new AppException('FORBIDDEN', 'Target user is not in staff clinic scope', {}, 403);
+      }
     }
 
     const latest = await this.creditTierRepository.findOne({

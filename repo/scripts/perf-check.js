@@ -79,7 +79,20 @@ async function main() {
   console.log(`[perf] PASS: p95 ${p95.toFixed(2)}ms < ${p95ThresholdMs.toFixed(2)}ms`);
 }
 
-main().catch((error) => {
+function explainConnectionFailure(error) {
+  const cause = error && error.cause;
+  const code = cause && cause.code;
+  if (code === 'ECONNREFUSED' || (typeof error.message === 'string' && error.message.includes('fetch failed'))) {
+    const base = process.env.API_BASE_URL || 'http://localhost:3001/api/v1';
+    console.error(`[perf] API not reachable at ${base} (connection refused or fetch failed).`);
+    console.error('[perf] From the repo directory start the stack: docker compose up -d');
+    console.error('[perf] Or skip live checks when using run_tests: SKIP_LIVE_TESTS=1 bash run_tests.sh');
+    return;
+  }
   console.error('[perf] unexpected error', error);
+}
+
+main().catch((error) => {
+  explainConnectionFailure(error);
   process.exit(1);
 });

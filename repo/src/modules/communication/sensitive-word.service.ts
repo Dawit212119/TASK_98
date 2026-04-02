@@ -63,6 +63,17 @@ export class SensitiveWordService {
     qb.orderBy('sw.word', 'ASC').addOrderBy('sw.id', 'ASC');
     const items = await qb.getMany();
 
+    await this.auditService.appendLog({
+      entityType: 'sensitive_word',
+      entityId: null,
+      action: 'sensitive_word.list',
+      actorId: userId,
+      payload: {
+        filter_active: query.active ?? null,
+        result_count: items.length
+      }
+    });
+
     return {
       items: items.map((item) => this.mapSensitiveWord(item)),
       total: items.length

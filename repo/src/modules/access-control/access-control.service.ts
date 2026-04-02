@@ -11,6 +11,7 @@ import { AuditIntegrityQueryDto, AuditLogQueryDto } from '../audit/dto/audit-log
 import { ProvisionUserDto } from './dto/provision-user.dto';
 import { RolePermissionEntity } from './entities/role-permission.entity';
 import { UserDataScopeEntity } from './entities/user-data-scope.entity';
+import { DataScopeEntity } from './entities/data-scope.entity';
 import { RoleEntity } from './entities/role.entity';
 import { UserRoleEntity } from './entities/user-role.entity';
 import { PermissionEntity } from './entities/permission.entity';
@@ -35,7 +36,9 @@ export class AccessControlService {
     @InjectRepository(SecurityAnswerEntity)
     private readonly securityAnswerRepository: Repository<SecurityAnswerEntity>,
     @InjectRepository(UserDataScopeEntity)
-    private readonly userDataScopeRepository: Repository<UserDataScopeEntity>
+    private readonly userDataScopeRepository: Repository<UserDataScopeEntity>,
+    @InjectRepository(DataScopeEntity)
+    private readonly dataScopeRepository: Repository<DataScopeEntity>
   ) {}
 
   findRoleByName(name: string): Promise<RoleEntity | null> {
@@ -312,6 +315,86 @@ export class AccessControlService {
   async getUserDataScopeIds(userId: string): Promise<string[]> {
     const rows = await this.userDataScopeRepository.find({ where: { userId, deletedAt: IsNull() }, select: { scopeId: true } });
     return [...new Set(rows.map((row) => row.scopeId))];
+  }
+
+  async listDataScopes(actorId: string): Promise<{ items: Array<{ id: string; scope_type: string; scope_key: string; description: string | null }> }> {
+    const scopes = await this.dataScopeRepository.find({
+      where: { deletedAt: IsNull() },
+      order: { scopeKey: 'ASC' }
+    });
+
+    await this.auditService.appendLog({
+      entityType: 'access_control',
+      entityId: null,
+      action: 'access.scopes.read',
+      actorId,
+      payload: { outcome: 'success', scope_count: scopes.length }
+    });
+
+    return {
+      items: scopes.map((s) => ({
+        id: s.id,
+        scope_type: s.scopeType,
+        scope_key: s.scopeKey,
+        description: s.description
+      }))
+    };
+  }
+
+  async getUserDataScopes(
+    actorId: string,
+    userId: string
+  ): Promise<{ user_id: string; items: Array<{ id: string; scope_type: string; scope_key: string; description: string | null }> }> {
+    const rows = await this.userDataScopeRepository.find({ where: { userId, deletedAt: IsNull() } });
+    const scopeIds = [...new Set(rows.map((r) => r.scopeId))];
+
+    const scopes = scopeIds.length > 0
+      ? await this.dataScopeRepository.find({ where: { id: In(scopeIds), deletedAt: IsNull() } })
+      : [];
+
+    await this.auditService.appendLog({
+      entityType: 'access_control',
+      entityId: userId,
+      action: 'access.user_scopes.read',
+      actorId,
+      payload: { outcome: 'success', target_user_id: userId, scope_count: scopes.length }
+    });
+
+    return {
+      user_id: userId,
+      items: scopes.map((s) => ({
+        id: s.id,
+        scope_type: s.scopeType,
+        scope_key: s.scopeKey,
+        description: s.description
+      }))
+    };
+  }
+
+  async replaceUserDataScopes(
+    actorId: string,
+    userId: string,
+    scopeIds: string[]
+  ): Promise<{ user_id: string; scope_ids: string[] }> {
+    const scopes = await this.dataScopeRepository.find({ where: { id: In(scopeIds), deletedAt: IsNull() } });
+    if (scopes.length !== scopeIds.length) {
+      throw new AppException('ACCESS_SCOPE_NOT_FOUND', 'One or more data scopes do not exist', {}, 422);
+    }
+
+    await this.userDataScopeRepository.delete({ userId });
+    await this.userDataScopeRepository.save(
+      scopeIds.map((scopeId) => this.userDataScopeRepository.create({ userId, scopeId }))
+    );
+
+    await this.auditService.appendLog({
+      actorId,
+      action: 'access.user_scopes.replace',
+      entityType: 'user',
+      entityId: userId,
+      payload: { scope_ids: scopeIds }
+    });
+
+    return { user_id: userId, scope_ids: scopeIds };
   }
 
   async getAuditLogs(

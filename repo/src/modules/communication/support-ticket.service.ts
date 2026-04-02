@@ -73,6 +73,7 @@ export class SupportTicketService {
       await this.reservationService.ensureReservationForAttachment(userId, ticket.reservationId);
     } else {
       await this.reservationService.ensureReservationRecordExists(ticket.reservationId);
+      await this.scopePolicyService.assertReservationIdInScope(userId, ticket.reservationId, roles);
     }
     if (ticket.status !== SUPPORT_TICKET_STATUS_OPEN) {
       throw new AppException('SUPPORT_TICKET_INVALID_STATE', 'Ticket cannot be escalated from current state', {}, 422);
@@ -117,6 +118,7 @@ export class SupportTicketService {
     }
 
     await this.reservationService.ensureReservationRecordExists(ticket.reservationId);
+    await this.scopePolicyService.assertReservationIdInScope(userId, ticket.reservationId, roles);
 
     const validSourceStatuses = new Set([SUPPORT_TICKET_STATUS_OPEN, SUPPORT_TICKET_STATUS_ESCALATED]);
     if (!validSourceStatuses.has(ticket.status)) {
@@ -160,6 +162,7 @@ export class SupportTicketService {
     }
 
     await this.reservationService.ensureReservationRecordExists(ticket.reservationId);
+    await this.scopePolicyService.assertReservationIdInScope(userId, ticket.reservationId, roles);
 
     if (ticket.status !== SUPPORT_TICKET_STATUS_RESOLVED) {
       throw new AppException('SUPPORT_TICKET_INVALID_STATE', 'Ticket can only be closed after resolution', {}, 422);

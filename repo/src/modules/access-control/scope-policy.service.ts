@@ -164,6 +164,21 @@ export class ScopePolicyService {
     qb.andWhere(`(${conditions.join(' OR ')})`, { scopeUserId: userId });
   }
 
+  /**
+   * Asserts that a staff or merchant user has scoped clinic access to a reservation
+   * identified by ID only. ops_admin bypasses all scope constraints.
+   * Throws 403 if the user's assigned data scopes do not intersect with the reservation's scopes.
+   */
+  async assertReservationIdInScope(userId: string, reservationId: string, roles: string[]): Promise<void> {
+    if (roles.includes('ops_admin')) {
+      return;
+    }
+    const hasAccess = await this.hasScopedClinicAccess(userId, reservationId);
+    if (!hasAccess) {
+      throw new AppException('FORBIDDEN', 'Reservation is out of scope', { reservation_id: reservationId }, 403);
+    }
+  }
+
   private async hasScopedClinicAccess(userId: string, reservationId: string): Promise<boolean> {
     const scopeIds = await this.getUserScopeIds(userId);
     if (scopeIds.length === 0) {

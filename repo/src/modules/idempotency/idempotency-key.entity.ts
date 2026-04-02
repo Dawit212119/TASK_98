@@ -1,7 +1,12 @@
-import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, Unique, UpdateDateColumn } from 'typeorm';
+import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
+/**
+ * Unique constraints are enforced via partial DB indexes (see migration
+ * 1700000018000-IdempotencyActorBinding):
+ *   - authenticated: UNIQUE(key, endpoint, actor_user_id) WHERE actor_user_id IS NOT NULL
+ *   - anonymous:     UNIQUE(key, endpoint)               WHERE actor_user_id IS NULL
+ */
 @Entity('idempotency_keys')
-@Unique('uq_idempotency_key_endpoint', ['key', 'endpoint'])
 export class IdempotencyKeyEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -11,6 +16,10 @@ export class IdempotencyKeyEntity {
 
   @Column({ type: 'varchar', length: 255 })
   endpoint!: string;
+
+  /** Null for unauthenticated (public) endpoints; set to the JWT subject for authenticated routes. */
+  @Column({ name: 'actor_user_id', type: 'varchar', length: 36, nullable: true })
+  actorUserId!: string | null;
 
   @Column({ name: 'request_hash', type: 'varchar', length: 128, nullable: true })
   requestHash!: string | null;

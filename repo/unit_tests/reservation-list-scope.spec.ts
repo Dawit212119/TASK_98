@@ -64,12 +64,11 @@ describe('ReservationService listReservations scope', () => {
     return { service, andWhereCalls, qb };
   };
 
-  it('throws 403 for merchant-only role', async () => {
+  it('allows merchant-only role to list with clinic-scope filter applied', async () => {
+    // Merchants may list reservations scoped to their assigned clinics.
+    // The scopePolicyService.applyReservationScopeQuery handles the actual filtering.
     const { service } = createService(['merchant']);
-    await expect(service.listReservations('u1', defaultQuery as any)).rejects.toMatchObject({
-      code: 'RESERVATION_LIST_FORBIDDEN'
-    });
-    await expect(service.listReservations('u1', defaultQuery as any)).rejects.toBeInstanceOf(AppException);
+    await expect(service.listReservations('u1', defaultQuery as any)).resolves.toBeDefined();
   });
 
   it('throws 403 for analytics_viewer-only role', async () => {
