@@ -81,18 +81,24 @@ describe('ReservationService appendReservationNote', () => {
     expect(out.created_at).toBe(createdAt.toISOString());
 
     expect(noteRepository.save).toHaveBeenCalled();
-    expect(auditService.appendLog).toHaveBeenCalledWith({
-      entityType: 'reservation',
-      entityId: reservationId,
-      action: 'reservation.note.create',
-      actorId: userId,
-      payload: {
-        note_id: 'note-uuid-1',
-        reservation_id: reservationId,
-        author_id: userId,
-        note_length: 'Post-visit clarification.'.length
-      }
-    });
+    expect(auditService.appendLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entityType: 'reservation',
+        entityId: reservationId,
+        action: 'reservation.note.create',
+        actorId: userId,
+        payload: expect.objectContaining({
+          access_basis: 'self',
+          outcome: 'success',
+          filters: expect.objectContaining({
+            reservation_id: reservationId,
+            note_id: 'note-uuid-1'
+          }),
+          author_id: userId,
+          note_length: 'Post-visit clarification.'.length
+        })
+      })
+    );
   });
 
   it('throws NOT_FOUND 404 when reservation does not exist', async () => {

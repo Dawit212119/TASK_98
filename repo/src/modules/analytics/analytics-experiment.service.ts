@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { IsNull, Repository } from 'typeorm';
 import { AccessControlService } from '../access-control/access-control.service';
 import { AuditService } from '../audit/audit.service';
+import { buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { AppException } from '../../common/exceptions/app.exception';
 import { AnalyticsExperimentEntity } from './entities/analytics-experiment.entity';
 import { AnalyticsAssignmentEntity } from './entities/analytics-assignment.entity';
@@ -37,15 +38,20 @@ export class AnalyticsExperimentService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'analytics_experiment',
-      entityId: experiment.id,
-      action: 'analytics.experiment.create',
-      actorId: userId,
-      payload: {
-        variants: payload.variants
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'analytics_experiment',
+          entityId: experiment.id,
+          action: 'analytics.experiment.create',
+          actorId: userId,
+          accessBasis: 'permission_based',
+          filters: {},
+          outcome: 'success'
+        },
+        { variants: payload.variants }
+      )
+    );
 
     return {
       experiment_id: experiment.id,
@@ -73,17 +79,20 @@ export class AnalyticsExperimentService {
 
     const existing = await this.assignmentRepository.findOne({ where: { experimentId, userId: targetUserId } });
     if (existing) {
-      await this.auditService.appendLog({
-        entityType: 'analytics_experiment',
-        entityId: experimentId,
-        action: 'analytics.experiment.assignment.read',
-        actorId: userId,
-        payload: {
-          target_user_id: targetUserId,
-          outcome: 'existing_assignment',
-          variant: existing.variant
-        }
-      });
+      await this.auditService.appendLog(
+        buildPrivilegedAuditPayload(
+          {
+            entityType: 'analytics_experiment',
+            entityId: experimentId,
+            action: 'analytics.experiment.assignment.read',
+            actorId: userId,
+            accessBasis: 'permission_based',
+            filters: { target_user_id: targetUserId },
+            outcome: 'success'
+          },
+          { assignment_outcome: 'existing_assignment', variant: existing.variant }
+        )
+      );
       return {
         experiment_id: experimentId,
         user_id: targetUserId,
@@ -105,17 +114,20 @@ export class AnalyticsExperimentService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'analytics_experiment',
-      entityId: experimentId,
-      action: 'analytics.experiment.assignment.read',
-      actorId: userId,
-      payload: {
-        target_user_id: targetUserId,
-        outcome: 'new_assignment',
-        variant: assignment.variant
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'analytics_experiment',
+          entityId: experimentId,
+          action: 'analytics.experiment.assignment.read',
+          actorId: userId,
+          accessBasis: 'permission_based',
+          filters: { target_user_id: targetUserId },
+          outcome: 'success'
+        },
+        { assignment_outcome: 'new_assignment', variant: assignment.variant }
+      )
+    );
 
     return {
       experiment_id: assignment.experimentId,

@@ -38,6 +38,12 @@ class EnvironmentVariables {
   @Min(60)
   JWT_EXPIRES_IN_SECONDS!: number;
 
+  /** Absolute session lifetime for refresh rotation (default 7 days). Access JWT TTL is JWT_EXPIRES_IN_SECONDS. */
+  @IsOptional()
+  @IsInt()
+  @Min(300)
+  JWT_REFRESH_EXPIRES_IN_SECONDS?: number;
+
   @IsInt()
   @Min(1)
   RESET_TOKEN_EXPIRES_IN_MINUTES!: number;
@@ -97,6 +103,18 @@ class EnvironmentVariables {
   @Min(1)
   @Max(1440)
   AUTH_LOGIN_LOCK_MINUTES?: number;
+
+  /** Rate limiter time-to-live in milliseconds (default 60000 = 60s). */
+  @IsOptional()
+  @IsInt()
+  @Min(1000)
+  THROTTLE_TTL?: number;
+
+  /** Maximum requests allowed per TTL window (default 120). */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  THROTTLE_LIMIT?: number;
 
   /** Set to 'false' to disable the 03:00 UTC credit-tier cron (e.g. in some test environments). */
   @IsOptional()

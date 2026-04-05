@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AppException } from '../../common/exceptions/app.exception';
 import { AuditService } from '../audit/audit.service';
+import { buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { SensitiveWordEntity } from './entities/sensitive-word.entity';
 import { AccessControlService } from '../access-control/access-control.service';
 
@@ -35,16 +36,20 @@ export class SensitiveWordService {
     const entity = this.sensitiveWordRepository.create({ word: normalized, active: true });
     const saved = await this.sensitiveWordRepository.save(entity);
 
-    await this.auditService.appendLog({
-      entityType: 'sensitive_word',
-      entityId: saved.id,
-      action: 'sensitive_word.create',
-      actorId: userId,
-      payload: {
-        word: saved.word,
-        active: saved.active
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'sensitive_word',
+          entityId: saved.id,
+          action: 'sensitive_word.create',
+          actorId: userId,
+          accessBasis: 'ops_admin',
+          filters: {},
+          outcome: 'success'
+        },
+        { word: saved.word, active: saved.active }
+      )
+    );
 
     return this.mapSensitiveWord(saved);
   }
@@ -63,16 +68,20 @@ export class SensitiveWordService {
     qb.orderBy('sw.word', 'ASC').addOrderBy('sw.id', 'ASC');
     const items = await qb.getMany();
 
-    await this.auditService.appendLog({
-      entityType: 'sensitive_word',
-      entityId: null,
-      action: 'sensitive_word.list',
-      actorId: userId,
-      payload: {
-        filter_active: query.active ?? null,
-        result_count: items.length
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'sensitive_word',
+          entityId: null,
+          action: 'sensitive_word.list',
+          actorId: userId,
+          accessBasis: 'ops_admin',
+          filters: { filter_active: query.active ?? null },
+          outcome: 'success'
+        },
+        { result_count: items.length }
+      )
+    );
 
     return {
       items: items.map((item) => this.mapSensitiveWord(item)),
@@ -102,17 +111,20 @@ export class SensitiveWordService {
     word.word = normalized;
     const saved = await this.sensitiveWordRepository.save(word);
 
-    await this.auditService.appendLog({
-      entityType: 'sensitive_word',
-      entityId: saved.id,
-      action: 'sensitive_word.update',
-      actorId: userId,
-      payload: {
-        before,
-        after: saved.word,
-        active: saved.active
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'sensitive_word',
+          entityId: saved.id,
+          action: 'sensitive_word.update',
+          actorId: userId,
+          accessBasis: 'ops_admin',
+          filters: {},
+          outcome: 'success'
+        },
+        { before, after: saved.word, active: saved.active }
+      )
+    );
 
     return this.mapSensitiveWord(saved);
   }
@@ -130,17 +142,20 @@ export class SensitiveWordService {
     word.active = active;
     const saved = await this.sensitiveWordRepository.save(word);
 
-    await this.auditService.appendLog({
-      entityType: 'sensitive_word',
-      entityId: saved.id,
-      action: 'sensitive_word.toggle',
-      actorId: userId,
-      payload: {
-        before_active: before,
-        after_active: saved.active,
-        word: saved.word
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'sensitive_word',
+          entityId: saved.id,
+          action: 'sensitive_word.toggle',
+          actorId: userId,
+          accessBasis: 'ops_admin',
+          filters: {},
+          outcome: 'success'
+        },
+        { before_active: before, after_active: saved.active, word: saved.word }
+      )
+    );
 
     return this.mapSensitiveWord(saved);
   }

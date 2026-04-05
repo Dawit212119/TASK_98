@@ -14,6 +14,10 @@ export class SessionEntity {
   @Column({ name: 'expires_at', type: 'timestamptz' })
   expiresAt!: Date;
 
+  /** SHA-256 hex of opaque refresh token; rotated on each refresh. */
+  @Column({ name: 'refresh_token_hash', type: 'varchar', length: 64, nullable: true })
+  refreshTokenHash!: string | null;
+
   @Column({ name: 'invalidated_at', type: 'timestamptz', nullable: true })
   invalidatedAt!: Date | null;
 

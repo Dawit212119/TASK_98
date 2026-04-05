@@ -25,6 +25,7 @@ import { AuthService } from './auth.service';
 import { ConfirmPasswordResetDto } from './dto/confirm-password-reset.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { VerifySecurityAnswerDto } from './dto/verify-security-answer.dto';
 
 @Controller('auth')
@@ -49,6 +50,7 @@ export class AuthController {
     access_token: string;
     expires_in: number;
     session_id: string;
+    refresh_token: string;
   }> {
     return this.authService.register(payload);
   }
@@ -62,9 +64,24 @@ export class AuthController {
     access_token?: string;
     expires_in?: number;
     session_id?: string;
+    refresh_token?: string;
     lockout_remaining_seconds?: number;
   }> {
     return this.authService.login(payload);
+  }
+
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Issue a new access token using refresh token (rotates refresh token)' })
+  @ApiOkResponse({ description: 'New access and refresh tokens' })
+  @ApiUnauthorizedResponse({ description: 'Invalid or expired refresh credentials' })
+  refresh(@Body() payload: RefreshTokenDto): Promise<{
+    access_token: string;
+    expires_in: number;
+    session_id: string;
+    refresh_token: string;
+  }> {
+    return this.authService.refreshTokens(payload);
   }
 
   @Post('logout')

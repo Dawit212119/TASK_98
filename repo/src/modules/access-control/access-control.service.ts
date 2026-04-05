@@ -7,6 +7,7 @@ import { SecurityAnswerEntity } from '../auth/entities/security-answer.entity';
 import { SecurityQuestionEntity } from '../auth/entities/security-question.entity';
 import { UserEntity } from '../auth/entities/user.entity';
 import { AuditService } from '../audit/audit.service';
+import { buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { AuditIntegrityQueryDto, AuditLogQueryDto } from '../audit/dto/audit-log-query.dto';
 import { ProvisionUserDto } from './dto/provision-user.dto';
 import { RolePermissionEntity } from './entities/role-permission.entity';
@@ -59,16 +60,20 @@ export class AccessControlService {
       }))
     };
 
-    await this.auditService.appendLog({
-      entityType: 'access_control',
-      entityId: null,
-      action: 'access.roles.read',
-      actorId,
-      payload: {
-        outcome: 'success',
-        role_count: result.items.length
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'access_control',
+          entityId: null,
+          action: 'access.roles.read',
+          actorId,
+          accessBasis: 'permission_based',
+          filters: {},
+          outcome: 'success'
+        },
+        { role_count: result.items.length }
+      )
+    );
 
     return result;
   }
@@ -110,16 +115,20 @@ export class AccessControlService {
       )
     );
 
-    await this.auditService.appendLog({
-      actorId,
-      action: 'access.role.create',
-      entityType: 'role',
-      entityId: role.id,
-      payload: {
-        role_name: role.name,
-        permission_ids: payload.permission_ids
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          actorId,
+          action: 'access.role.create',
+          entityType: 'role',
+          entityId: role.id,
+          accessBasis: 'permission_based',
+          filters: {},
+          outcome: 'success'
+        },
+        { role_name: role.name, permission_ids: payload.permission_ids }
+      )
+    );
 
     return {
       id: role.id,
@@ -142,15 +151,20 @@ export class AccessControlService {
     await this.userRoleRepository.delete({ userId });
     await this.assignRoleIdsToUser(userId, roleIds);
 
-    await this.auditService.appendLog({
-      actorId,
-      action: 'access.user_roles.replace',
-      entityType: 'user',
-      entityId: userId,
-      payload: {
-        role_ids: roleIds
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          actorId,
+          action: 'access.user_roles.replace',
+          entityType: 'user',
+          entityId: userId,
+          accessBasis: 'permission_based',
+          filters: {},
+          outcome: 'success'
+        },
+        { role_ids: roleIds }
+      )
+    );
 
     return {
       user_id: userId,
@@ -219,15 +233,31 @@ export class AccessControlService {
           where: { userId: actorId, deletedAt: IsNull() },
           select: { scopeId: true }
         });
-        const scopeIds = [...new Set(actorScopeRows.map((row) => row.scopeId))];
+        const actorScopeIds = [...new Set(actorScopeRows.map((row) => row.scopeId))];
 
-        if (scopeIds.length === 0) {
+        let scopeIdsToAssign: string[];
+        if (actorScopeIds.length > 0) {
+          scopeIdsToAssign = actorScopeIds;
+        } else if (actorRoles.includes('ops_admin')) {
+          const defaultScope = await queryRunner.manager.getRepository(DataScopeEntity).findOne({
+            where: { scopeKey: 'default_clinic', deletedAt: IsNull() }
+          });
+          if (!defaultScope) {
+            throw new AppException(
+              'ACCESS_DEFAULT_SCOPE_MISSING',
+              'Default clinic data scope is not configured',
+              {},
+              500
+            );
+          }
+          scopeIdsToAssign = [defaultScope.id];
+        } else {
           throw new AppException('ACCESS_PROVISION_SCOPE_REQUIRED', 'Provisioner must have at least one data scope', {}, 422);
         }
 
         await queryRunner.manager.save(
           UserDataScopeEntity,
-          scopeIds.map((scopeId) =>
+          scopeIdsToAssign.map((scopeId) =>
             this.userDataScopeRepository.create({
               userId: user.id,
               scopeId
@@ -238,16 +268,20 @@ export class AccessControlService {
 
       await queryRunner.commitTransaction();
 
-      await this.auditService.appendLog({
-        actorId,
-        action: 'access.user.provision',
-        entityType: 'user',
-        entityId: user.id,
-        payload: {
-          username: user.username,
-          role: role.name
-        }
-      });
+      await this.auditService.appendLog(
+        buildPrivilegedAuditPayload(
+          {
+            actorId,
+            action: 'access.user.provision',
+            entityType: 'user',
+            entityId: user.id,
+            accessBasis: 'ops_admin',
+            filters: {},
+            outcome: 'success'
+          },
+          { username: user.username, role: role.name }
+        )
+      );
 
       return {
         user_id: user.id,
@@ -323,13 +357,20 @@ export class AccessControlService {
       order: { scopeKey: 'ASC' }
     });
 
-    await this.auditService.appendLog({
-      entityType: 'access_control',
-      entityId: null,
-      action: 'access.scopes.read',
-      actorId,
-      payload: { outcome: 'success', scope_count: scopes.length }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'access_control',
+          entityId: null,
+          action: 'access.scopes.read',
+          actorId,
+          accessBasis: 'permission_based',
+          filters: {},
+          outcome: 'success'
+        },
+        { scope_count: scopes.length }
+      )
+    );
 
     return {
       items: scopes.map((s) => ({
@@ -352,13 +393,20 @@ export class AccessControlService {
       ? await this.dataScopeRepository.find({ where: { id: In(scopeIds), deletedAt: IsNull() } })
       : [];
 
-    await this.auditService.appendLog({
-      entityType: 'access_control',
-      entityId: userId,
-      action: 'access.user_scopes.read',
-      actorId,
-      payload: { outcome: 'success', target_user_id: userId, scope_count: scopes.length }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'access_control',
+          entityId: userId,
+          action: 'access.user_scopes.read',
+          actorId,
+          accessBasis: 'permission_based',
+          filters: { target_user_id: userId },
+          outcome: 'success'
+        },
+        { scope_count: scopes.length }
+      )
+    );
 
     return {
       user_id: userId,
@@ -386,13 +434,19 @@ export class AccessControlService {
       scopeIds.map((scopeId) => this.userDataScopeRepository.create({ userId, scopeId }))
     );
 
-    await this.auditService.appendLog({
-      actorId,
-      action: 'access.user_scopes.replace',
-      entityType: 'user',
-      entityId: userId,
-      payload: { scope_ids: scopeIds }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          actorId,
+          action: 'access.user_scopes.replace',
+          entityType: 'user',
+          entityId: userId,
+          accessBasis: 'permission_based',
+          filters: { scope_ids: scopeIds },
+          outcome: 'success'
+        }
+      )
+    );
 
     return { user_id: userId, scope_ids: scopeIds };
   }
@@ -408,22 +462,27 @@ export class AccessControlService {
   }> {
     const result = await this.auditService.getLogs(query);
 
-    await this.auditService.appendLog({
-      entityType: 'access_control',
-      entityId: null,
-      action: 'access.audit_logs.read',
-      actorId,
-      payload: {
-        outcome: 'success',
-        page: query.page,
-        page_size: query.page_size,
-        filter_entity_type: query.entity_type ?? null,
-        filter_actor_id: query.actor_id ?? null,
-        filter_from: query.from ?? null,
-        filter_to: query.to ?? null,
-        result_total: result.total
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'access_control',
+          entityId: null,
+          action: 'access.audit_logs.read',
+          actorId,
+          accessBasis: 'permission_based',
+          filters: {
+            page: query.page,
+            page_size: query.page_size,
+            filter_entity_type: query.entity_type ?? null,
+            filter_actor_id: query.actor_id ?? null,
+            filter_from: query.from ?? null,
+            filter_to: query.to ?? null,
+            result_total: result.total
+          },
+          outcome: 'success'
+        }
+      )
+    );
 
     return result;
   }
@@ -440,20 +499,26 @@ export class AccessControlService {
   }> {
     const result = await this.auditService.verifyIntegrity(query);
 
-    await this.auditService.appendLog({
-      entityType: 'access_control',
-      entityId: null,
-      action: 'access.audit_integrity.verify',
-      actorId,
-      payload: {
-        outcome: result.valid ? 'valid' : 'invalid',
-        checked_count: result.checked_count,
-        first_invalid_record_id: result.first_invalid_record_id,
-        filter_from: query.from ?? null,
-        filter_to: query.to ?? null,
-        filter_limit: query.limit ?? null
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'access_control',
+          entityId: null,
+          action: 'access.audit_integrity.verify',
+          actorId,
+          accessBasis: 'permission_based',
+          filters: {
+            filter_from: query.from ?? null,
+            filter_to: query.to ?? null,
+            filter_limit: query.limit ?? null,
+            chain_valid: result.valid,
+            checked_count: result.checked_count,
+            first_invalid_record_id: result.first_invalid_record_id
+          },
+          outcome: 'success'
+        }
+      )
+    );
 
     return result;
   }

@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { IsNull, Repository } from 'typeorm';
 import { AccessControlService } from '../access-control/access-control.service';
 import { AuditService } from '../audit/audit.service';
+import { buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { AppException } from '../../common/exceptions/app.exception';
 import { AnalyticsExportEntity } from './entities/analytics-export.entity';
 import { CreateCsvExportDto, ANALYTICS_CSV_REPORT_TYPES } from './dto/create-csv-export.dto';
@@ -55,16 +56,20 @@ export class AnalyticsExportService {
     exportRecord.status = 'READY';
     await this.exportRepository.save(exportRecord);
 
-    await this.auditService.appendLog({
-      entityType: 'analytics_export',
-      entityId: exportRecord.id,
-      action: 'analytics.export.create',
-      actorId: userId,
-      payload: {
-        report_type: payload.report_type,
-        columns_count: payload.columns.length
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'analytics_export',
+          entityId: exportRecord.id,
+          action: 'analytics.export.create',
+          actorId: userId,
+          accessBasis: 'permission_based',
+          filters: {},
+          outcome: 'success'
+        },
+        { report_type: payload.report_type, columns_count: payload.columns.length }
+      )
+    );
 
     return {
       export_id: exportRecord.id,
@@ -86,16 +91,23 @@ export class AnalyticsExportService {
 
     await this.assertCanAccessAnalyticsExport(userId, exportRecord);
 
-    await this.auditService.appendLog({
-      entityType: 'analytics_export',
-      entityId: exportRecord.id,
-      action: 'analytics.export.metadata.read',
-      actorId: userId,
-      payload: {
-        resource_owner_id: exportRecord.requestedBy,
-        access: exportRecord.requestedBy === userId ? 'owner' : 'ops_admin'
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'analytics_export',
+          entityId: exportRecord.id,
+          action: 'analytics.export.metadata.read',
+          actorId: userId,
+          accessBasis: 'permission_based',
+          filters: {},
+          outcome: 'success'
+        },
+        {
+          resource_owner_id: exportRecord.requestedBy,
+          access: exportRecord.requestedBy === userId ? 'owner' : 'ops_admin'
+        }
+      )
+    );
 
     return {
       export_id: exportRecord.id,
@@ -127,16 +139,23 @@ export class AnalyticsExportService {
       throw new AppException('NOT_FOUND', 'Export file not available', { export_id: exportId }, 404);
     }
 
-    await this.auditService.appendLog({
-      entityType: 'analytics_export',
-      entityId: exportRecord.id,
-      action: 'analytics.export.download',
-      actorId: userId,
-      payload: {
-        resource_owner_id: exportRecord.requestedBy,
-        access: exportRecord.requestedBy === userId ? 'owner' : 'ops_admin'
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'analytics_export',
+          entityId: exportRecord.id,
+          action: 'analytics.export.download',
+          actorId: userId,
+          accessBasis: 'permission_based',
+          filters: {},
+          outcome: 'success'
+        },
+        {
+          resource_owner_id: exportRecord.requestedBy,
+          access: exportRecord.requestedBy === userId ? 'owner' : 'ops_admin'
+        }
+      )
+    );
 
     const filename = exportRecord.filePath.split(/[/\\]/).pop() ?? `${exportId}.csv`;
     return {

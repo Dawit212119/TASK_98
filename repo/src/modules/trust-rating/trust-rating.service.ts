@@ -7,6 +7,7 @@ import { AppException } from '../../common/exceptions/app.exception';
 import { AccessControlService } from '../access-control/access-control.service';
 import { ScopePolicyService } from '../access-control/scope-policy.service';
 import { AuditService } from '../audit/audit.service';
+import { AccessBasis, buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { ReservationStateTransitionEntity } from '../reservation/entities/reservation-state-transition.entity';
 import { ReservationEntity, ReservationStatus } from '../reservation/entities/reservation.entity';
 import { ArbitrateAppealDto } from './dto/arbitrate-appeal.dto';
@@ -110,16 +111,21 @@ export class TrustRatingService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'review',
-      entityId: review.id,
-      action: 'trust.review.create',
-      actorId: userId,
-      payload: {
-        reservation_id: reservationId,
-        target_user_id: payload.target_user_id
-      }
-    });
+    const reviewAccessBasis: AccessBasis = reservation.patientId === userId ? 'self' : 'provider';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'review',
+          entityId: review.id,
+          action: 'trust.review.create',
+          actorId: userId,
+          accessBasis: reviewAccessBasis,
+          filters: { reservation_id: reservationId, target_user_id: payload.target_user_id },
+          outcome: 'success'
+        }
+      )
+    );
 
     return this.mapReview(review);
   }
@@ -136,6 +142,26 @@ export class TrustRatingService {
       where: { reservationId, deletedAt: IsNull() },
       order: { createdAt: 'ASC' }
     });
+
+    const roles = await this.accessControlService.getUserRoleNames(userId);
+    const listBasis: AccessBasis = roles.includes('ops_admin')
+      ? 'ops_admin'
+      : roles.includes('staff')
+        ? 'staff'
+        : roles.includes('provider')
+          ? 'provider'
+          : 'self';
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        entityType: 'review',
+        entityId: null,
+        action: 'trust.review.list',
+        actorId: userId,
+        accessBasis: listBasis,
+        filters: { reservation_id: reservationId, result_count: items.length },
+        outcome: 'success'
+      })
+    );
 
     return { items: items.map((item) => this.mapReview(item)) };
   }
@@ -173,13 +199,19 @@ export class TrustRatingService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'review_appeal',
-      entityId: appeal.id,
-      action: 'trust.appeal.create',
-      actorId: userId,
-      payload: { review_id: reviewId }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'review_appeal',
+          entityId: appeal.id,
+          action: 'trust.appeal.create',
+          actorId: userId,
+          accessBasis: 'self',
+          filters: { review_id: reviewId },
+          outcome: 'success'
+        }
+      )
+    );
 
     return {
       appeal_id: appeal.id,
@@ -216,16 +248,20 @@ export class TrustRatingService {
     appeal.version += 1;
     await this.reviewAppealRepository.save(appeal);
 
-    await this.auditService.appendLog({
-      entityType: 'appeal_decision',
-      entityId: decision.id,
-      action: 'trust.appeal.arbitrate',
-      actorId: userId,
-      payload: {
-        appeal_id: appealId,
-        outcome: payload.outcome
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'appeal_decision',
+          entityId: decision.id,
+          action: 'trust.appeal.arbitrate',
+          actorId: userId,
+          accessBasis: 'ops_admin',
+          filters: {},
+          outcome: 'success'
+        },
+        { appeal_id: appealId, appeal_outcome: payload.outcome }
+      )
+    );
 
     return {
       appeal_id: appeal.id,
@@ -279,18 +315,26 @@ export class TrustRatingService {
     const isPrivilegedReader = roles.includes('staff') || roles.includes('ops_admin');
     if (isPrivilegedReader) {
       const tierLabel = latest?.tier ?? 'UNRATED';
-      await this.auditService.appendLog({
-        entityType: 'credit_tier',
-        entityId: targetUserId,
-        action: 'trust.credit_tier.read',
-        actorId: userId,
-        payload: {
-          target_user_id: targetUserId,
-          tier: tierLabel,
-          had_record: Boolean(latest),
-          self_lookup: targetUserId === userId
-        }
-      });
+      const accessBasis: AccessBasis = isSelf ? 'self' : isOpsAdmin ? 'ops_admin' : 'staff';
+      await this.auditService.appendLog(
+        buildPrivilegedAuditPayload(
+          {
+            entityType: 'credit_tier',
+            entityId: targetUserId,
+            action: 'trust.credit_tier.read',
+            actorId: userId,
+            accessBasis,
+            filters: {},
+            outcome: 'success'
+          },
+          {
+            target_user_id: targetUserId,
+            tier: tierLabel,
+            had_record: Boolean(latest),
+            self_lookup: targetUserId === userId
+          }
+        )
+      );
     }
 
     if (!latest) {
@@ -330,23 +374,25 @@ export class TrustRatingService {
     qb.orderBy('f.created_at', 'DESC').addOrderBy('f.id', 'DESC').skip((query.page - 1) * query.page_size).take(query.page_size);
     const [items, total] = await qb.getManyAndCount();
 
-    await this.auditService.appendLog({
-      entityType: 'fraud_flag_query',
-      entityId: null,
-      action: 'trust.fraud_flags.read',
-      actorId: userId,
-      payload: {
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        entityType: 'fraud_flag_query',
+        entityId: null,
+        action: 'trust.fraud_flags.read',
+        actorId: userId,
+        accessBasis: 'ops_admin',
         filters: {
           user_id: query.user_id ?? null,
           from: query.from ?? null,
-          to: query.to ?? null
+          to: query.to ?? null,
+          page: query.page,
+          page_size: query.page_size,
+          result_total: total,
+          returned_count: items.length
         },
-        page: query.page,
-        page_size: query.page_size,
-        result_total: total,
-        returned_count: items.length
-      }
-    });
+        outcome: 'success'
+      })
+    );
 
     return {
       items: items.map((item) => ({

@@ -1,6 +1,8 @@
-# CareReserve API Skeleton
+# CareReserve API
 
-NestJS modular monolith scaffold for CareReserve with PostgreSQL + TypeORM migrations.
+NestJS modular monolith for **CareReserve** clinical operations: PostgreSQL, TypeORM migrations, RBAC/data scopes, domain modules (reservations, follow-up, communication, trust, workflow, analytics, sync, files, audit).
+
+**Delivery scope:** this repository is the **HTTP API** only. Offline-first **clients** are out of tree; they consume this API (including sync). See [`docs/DELIVERY_SCOPE.md`](docs/DELIVERY_SCOPE.md).
 
 ## 1) First run (one command)
 
@@ -18,22 +20,25 @@ The app container waits for PostgreSQL, runs migrations automatically, then star
 
 `POST /api/v1/auth/register` is the **only** self-service account creation path. The body must use `role: "patient"`. Any other role is rejected with **`422`** and code **`AUTH_REGISTRATION_ROLE_NOT_ALLOWED`**.
 
-Requirements: password policy, an **`Idempotency-Key`** header (missing key → **`400`** **`IDEMPOTENCY_KEY_REQUIRED`**; same key + different body → **`409`** **`IDEMPOTENCY_KEY_CONFLICT`**). Reusing the **same** key with the **same** body replays the **first** **`201` response body** from the server (idempotency cache). If that first response was from an older build, you might not see `access_token` until you use a **new** Idempotency-Key (e.g. fresh UUID in Swagger for each new signup attempt). Successful registration returns **`access_token`**, **`expires_in`**, and **`session_id`** in the JSON response body alongside `user_id` / `username` / `role`.
+Requirements: **strong password** (minimum length plus uppercase, lowercase, digit, and special character; common weak substrings rejected), an **`Idempotency-Key`** header (missing key → **`400`** **`IDEMPOTENCY_KEY_REQUIRED`**; same key + different body → **`409`** **`IDEMPOTENCY_KEY_CONFLICT`**). Reusing the **same** key with the **same** body replays the **first** **`201` response body** from the server (idempotency cache). If that first response was from an older build, you might not see `access_token` until you use a **new** Idempotency-Key (e.g. fresh UUID in Swagger for each new signup attempt). Successful registration returns **`access_token`**, **`expires_in`**, and **`session_id`** in the JSON response body alongside `user_id` / `username` / `role`.
 
-Security Q&A is **optional**: omit **both** `security_question_id` and `security_answer` for quick local/Swagger registration, or set **both** using ids from **`GET /api/v1/auth/security-questions`**. Only one of the pair → **`422`** **`AUTH_SECURITY_PAIR_INCOMPLETE`**.
+Security Q&A is **required** for every patient registration: set **`security_question_id`** (from **`GET /api/v1/auth/security-questions`**) and **`security_answer`**. Omitting either field fails validation with **`400`** **`VALIDATION_ERROR`**.
 
 ### Bootstrap ops admin and provisioning other roles
 
-There is **no** public API to create `ops_admin`, `staff`, `provider`, `merchant`, or `analytics_viewer`. After first boot, use the **seeded dev ops admin** from migrations (override via env in `.env` / compose if you change defaults):
+There is **no** public API to create `ops_admin`, `staff`, `provider`, `merchant`, or `analytics_viewer`. The bootstrap admin is created by a migration that reads from environment variables:
 
-| Item | Typical value |
-|------|----------------|
-| Username | `dev_ops_admin` (or `BOOTSTRAP_OPS_USERNAME`) |
-| Password | `DevOpsAdmin123!` (or `BOOTSTRAP_OPS_PASSWORD`) |
+| Env var | Required | Description |
+|---------|----------|-------------|
+| `BOOTSTRAP_OPS_USERNAME` | Yes (prod) | Admin username. Weak defaults (`admin`, `dev_ops_admin`, `root`) are rejected in production. |
+| `BOOTSTRAP_OPS_PASSWORD_HASH` | Yes (prod) | **Bcrypt hash** of the admin password (cost ≥ 10). Do **not** pass plaintext. Generate with `htpasswd -nbBC 10 "" 'YourPassword' \| cut -d: -f2` or equivalent. |
+| `BOOTSTRAP_OPS_SECURITY_ANSWER_HASH` | No | Bcrypt hash of the security answer (optional). |
 
-Seeded passwords are **development defaults** only; set real secrets via environment for non-local deployments.
+In non-production environments, the migration is a silent no-op when these env vars are absent — you can bootstrap the admin manually or via a CLI init flow. In **production**, the migration fails if `BOOTSTRAP_OPS_USERNAME` and `BOOTSTRAP_OPS_PASSWORD_HASH` are not set.
 
-Log in with `POST /api/v1/auth/login`, then provision users with **`POST /api/v1/access/provision-user`** (requires `access.user_roles.write`, **`Idempotency-Key`**, and JWT for an ops-backed account). Example:
+Log in with `POST /api/v1/auth/login` (response includes **`refresh_token`** and **`session_id`**). Use **`POST /api/v1/auth/refresh`** with those fields to rotate tokens without re-entering the password. Access token TTL: `JWT_EXPIRES_IN_SECONDS`; refresh/session window: `JWT_REFRESH_EXPIRES_IN_SECONDS` (optional, default 7 days).
+
+Then provision users with **`POST /api/v1/access/provision-user`** (requires `access.user_roles.write`, **`Idempotency-Key`**, and JWT for an ops-backed account). Example:
 
 ```bash
 curl -X POST "http://localhost:3001/api/v1/access/provision-user" \
@@ -49,13 +54,13 @@ curl -X POST "http://localhost:3001/api/v1/access/provision-user" \
   }'
 ```
 
-Use **`GET /api/v1/access/roles`** (with appropriate permissions) to inspect available role names. Non–ops callers receive **`403`** **`FORBIDDEN`** on provision endpoints.
+Use **`GET /api/v1/access/roles`** (with appropriate permissions) to inspect available role names. **`POST /access/provision-user`** requires both permission **`access.user_roles.write`** and the **`ops_admin`** role; other access routes are enforced by their listed permission codes (not by a blanket “ops_admin only” rule).
 
 ### Authorization and audit (security matrix)
 
 | Area | Route guard | Object-level / data rule | Audit event (successful access) |
 |------|-------------|---------------------------|----------------------------------|
-| **Access / RBAC** | `JwtAuthGuard` + `PermissionsGuard` + `@RequirePermissions` | Permission codes in DB (`access.roles.read`, `access.user_roles.write`, `access.audit.read`, …) | `access.roles.read` lists role catalog; `access.audit_logs.read` logs query filters + result total (no row payload) |
+| **Access / RBAC** | `JwtAuthGuard` + `PermissionsGuard` + `@RequirePermissions` | Permission codes in DB (`access.roles.read`, `access.user_roles.write`, `access.audit.read`, …). Provisioning is additionally restricted to **`ops_admin`** in the service layer. | Privileged audit entries use a standard payload (`access_basis`, `outcome`, `filters`) plus domain fields; e.g. `access.roles.read` lists role catalog; `access.audit_logs.read` logs query filters + result total (no row payload) |
 | **Analytics (reporting)** | `JwtAuthGuard` + `PermissionsGuard` on **`/analytics/*`**, including **`POST /analytics/events`** | Permission **`analytics.api.use`** (`ops_admin`, `analytics_viewer` via migration). **CSV exports:** caller may read metadata/download only if `requested_by` is self **or** caller is `ops_admin` | `analytics.export.metadata.read`, `analytics.export.download`, `analytics.experiment.assignment.read`, plus existing create/export writes |
 | **Workflow / reservations / trust / files / sync** | `JwtAuthGuard` on controllers | **Service-layer** role checks, reservation scope, file ownership, etc. (pattern: never trust ID alone without domain check) | Mixed (domain-specific `workflow.*`, `support.*`, …) |
 
@@ -63,7 +68,7 @@ Use **`GET /api/v1/access/roles`** (with appropriate permissions) to inspect ava
 
 **Review appeals:** Only **negative** reviews may be appealed. A review is negative when **any** dimension has score **≤ 2** (1–5 scale). Otherwise **`422`** **`APPEAL_REQUIRES_NEGATIVE_REVIEW`**.
 
-**Privileged trust reads (audit):** Successful **`GET /trust/credit-tiers/{user_id}`** by **`staff`** or **`ops_admin`** appends **`trust.credit_tier.read`**. Successful **`GET /trust/fraud-flags`** (**`ops_admin`**) appends **`trust.fraud_flags.read`** (filters + result counts in payload).
+**Privileged trust reads (audit):** Successful **`GET /trust/credit-tiers/{user_id}`** by **`staff`** or **`ops_admin`** appends **`trust.credit_tier.read`** with the standard privileged fields (`access_basis`, `outcome`, `filters`) plus tier metadata. Successful **`GET /trust/fraud-flags`** (**`ops_admin`**) appends **`trust.fraud_flags.read`** with query filters and result counts under **`filters`** (and the same standard fields).
 
 **Reproduce cross-user export denial (expect `403 FORBIDDEN`):**
 
@@ -316,6 +321,8 @@ curl http://localhost:3001/api/v1/health/error-sample \
   -H "Authorization: Bearer $TOKEN_WITH_DEBUG_HEALTH_VIEW"
 ```
 
+`debug.health.view` is seeded for `ops_admin`, so a standard ops-admin token can call this route.
+
 Response shape:
 
 ```json
@@ -373,7 +380,7 @@ curl -X POST "http://localhost:3001/api/v1/sync/push" \
 |---------|----------------|
 | `npm run test:unit` | Jest in `unit_tests/` only (no API process). |
 | `npm run test:api` | `API_tests/run_api_tests.sh` (needs live API + DB). |
-| `npm run test:perf` | p95 latency gate (default target: `GET /api/v1/health`, threshold `<300ms`). |
+| `npm run test:perf` | p95 latency gate (default paths: `GET /health` and `GET /auth/security-questions` under `API_BASE_URL`; threshold `<300ms` each). Override with `PERF_TARGET_PATH` (single) or `PERF_TARGET_PATHS` (comma-separated). Optional `PERF_AUTH_TOKEN` adds `Authorization: Bearer` for protected paths. |
 | `npm run audit:retention` | Executes protected audit-retention marker job. |
 | `npm test` / `./run_tests.sh` | Unit suite, API suite, then performance gate; prints an overall pass/fail summary. |
 | `npm run test:api:ps` | PowerShell wrapper for API tests only (see `run_tests.ps1`). |
@@ -457,37 +464,16 @@ curl -G "http://localhost:3001/api/v1/access/audit-logs/verify-integrity" \
   --data-urlencode "limit=1000"
 ```
 
-### Verification output evidence (latest run)
+### Reproducing verification locally
 
-Commands executed:
+To verify the full suite locally:
 
 ```bash
 npm run build
 npm run test:unit
 docker compose up --build -d
-curl http://localhost:3001/api/v1/health
-npm run test:api
+curl http://localhost:3001/api/v1/health   # expect {"status":"ok"}
+npm run test:api                            # expect all tests pass
 ```
 
-Observed outputs:
-
-- `npm run build` completed successfully.
-- `npm run test:unit` passed (`21` suites, `85` tests).
-- `docker compose up --build -d` completed with `carereserve-api Started` and `carereserve-postgres Healthy`.
-- Health check response included `{"status":"ok"}`.
-- API suite result:
-
-```text
-API tests summary: total=172 passed=172 failed=0
-```
-
-Targeted proof checks:
-
-- Invalid CSV export `report_type` returns `400 VALIDATION_ERROR` and allowed values (`funnel`, `retention`, `content_quality`).
-- Retention export download returns `200` CSV containing:
-
-```text
-cohort_start,cohort_end,bucket,cohort_size,retained_size,retention_rate_percent
-```
-
-Final verification summary: **PASS** (build + unit + API suites green; health endpoint reachable; retention export and validation checks confirmed).
+For CI-based evidence, link to the pipeline run artifact rather than pasting terminal output here — pasted output cannot be statically verified and becomes stale.

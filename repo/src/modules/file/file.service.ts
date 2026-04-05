@@ -9,6 +9,7 @@ import { IsNull, Repository } from 'typeorm';
 import { AppException } from '../../common/exceptions/app.exception';
 import { ScopePolicyService } from '../access-control/scope-policy.service';
 import { AuditService } from '../audit/audit.service';
+import { buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { ReservationService } from '../reservation/reservation.service';
 import { CreateIdentityDocumentDto } from './dto/create-identity-document.dto';
 import { IdentityDocumentEntity } from './entities/identity-document.entity';
@@ -32,6 +33,8 @@ export class FileService {
   ) {}
 
   async createIdentityDocument(userId: string, payload: CreateIdentityDocumentDto): Promise<Record<string, unknown>> {
+    // Any authenticated user may create their own identity document (self-service).
+    // The document is always owned by the caller (no cross-user creation).
     const normalizedNumber = payload.document_number.trim();
     if (normalizedNumber.length < 4) {
       throw new AppException('IDENTITY_DOCUMENT_INVALID_NUMBER', 'document_number must be at least 4 characters', {}, 422);
@@ -55,16 +58,23 @@ export class FileService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'identity_document',
-      entityId: entity.id,
-      action: 'identity_document.create',
-      actorId: userId,
-      payload: {
-        document_type: entity.documentType,
-        country: entity.country
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'identity_document',
+          entityId: entity.id,
+          action: 'identity_document.create',
+          actorId: userId,
+          accessBasis: 'self',
+          filters: {},
+          outcome: 'success'
+        },
+        {
+          document_type: entity.documentType,
+          country: entity.country
+        }
+      )
+    );
 
     return this.toIdentityDocumentDto(entity);
   }
@@ -80,6 +90,18 @@ export class FileService {
     if (!canRead) {
       throw new AppException('FORBIDDEN', 'Identity document is out of scope', { document_id: documentId }, 403);
     }
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        action: 'identity_document.read',
+        actorId: userId,
+        entityType: 'identity_document',
+        entityId: documentId,
+        accessBasis: roles.includes('ops_admin') ? 'ops_admin' : 'self',
+        filters: {},
+        outcome: 'success'
+      })
+    );
 
     return this.toIdentityDocumentDto(document);
   }
@@ -130,17 +152,24 @@ export class FileService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'reservation_file',
-      entityId: entity.id,
-      action: 'reservation.file.upload',
-      actorId: userId,
-      payload: {
-        reservation_id: reservationId,
-        filename: entity.filename,
-        size_bytes: entity.sizeBytes
-      }
-    });
+    const uploadRoles = await this.scopePolicyService.getRoles(userId);
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'reservation_file',
+          entityId: entity.id,
+          action: 'reservation.file.upload',
+          actorId: userId,
+          accessBasis: uploadRoles.includes('ops_admin') ? 'ops_admin' : uploadRoles.includes('staff') ? 'staff' : uploadRoles.includes('provider') ? 'provider' : 'self',
+          filters: { reservation_id: reservationId },
+          outcome: 'success'
+        },
+        {
+          filename: entity.filename,
+          size_bytes: entity.sizeBytes
+        }
+      )
+    );
 
     return this.toAttachmentDto(entity, true);
   }
@@ -159,6 +188,19 @@ export class FileService {
       skip: (query.page - 1) * query.page_size,
       take: query.page_size
     });
+
+    const listRoles = await this.scopePolicyService.getRoles(userId);
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        entityType: 'reservation_file',
+        entityId: null,
+        action: 'reservation.file.list',
+        actorId: userId,
+        accessBasis: listRoles.includes('ops_admin') ? 'ops_admin' : listRoles.includes('staff') ? 'staff' : listRoles.includes('provider') ? 'provider' : 'self',
+        filters: { reservation_id: reservationId, result_count: items.length },
+        outcome: 'success'
+      })
+    );
 
     return {
       items: items.map((item) => this.toAttachmentDto(item, isOpsAdmin)),
@@ -187,6 +229,19 @@ export class FileService {
     } catch {
       throw new AppException('FILE_NOT_AVAILABLE', 'File content is not available', { file_id: fileId }, 404);
     }
+
+    const roles = await this.scopePolicyService.getRoles(userId);
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        action: 'reservation.file.download',
+        actorId: userId,
+        entityType: 'reservation_file',
+        entityId: fileId,
+        accessBasis: roles.includes('ops_admin') ? 'ops_admin' : roles.includes('staff') ? 'staff' : roles.includes('provider') ? 'provider' : 'self',
+        filters: { reservation_id: file.reservationId },
+        outcome: 'success'
+      })
+    );
 
     return {
       stream: createReadStream(fullPath),

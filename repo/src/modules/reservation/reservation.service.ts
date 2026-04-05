@@ -4,6 +4,7 @@ import { DataSource, IsNull, Repository } from 'typeorm';
 import { AppException } from '../../common/exceptions/app.exception';
 import { ScopePolicyService } from '../access-control/scope-policy.service';
 import { AuditService } from '../audit/audit.service';
+import { AccessBasis, buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { AppendReservationNoteDto } from './dto/append-reservation-note.dto';
 import { CreateReservationDto } from './dto/create-reservation.dto';
 import { ReservationListQueryDto } from './dto/reservation-list-query.dto';
@@ -59,34 +60,83 @@ export class ReservationService {
       throw new AppException('RESERVATION_INVALID_TIME_WINDOW', 'Invalid reservation time window', {}, 422);
     }
 
-    const reservation = await this.reservationRepository.save(
-      this.reservationRepository.create({
-        patientId,
-        providerId: payload.provider_id ?? null,
-        startTime,
-        endTime,
-        status: ReservationStatus.CREATED,
-        version: 1
-      })
-    );
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
 
-    await this.scopePolicyService.ensureDefaultClinicReservationScope(reservation.id);
-    await this.scopePolicyService.assignReservationDefaultScopeFromActor(userId, reservation.id, roles);
-
-    if (payload.notes) {
-      await this.noteRepository.save(
-        this.noteRepository.create({
-          reservationId: reservation.id,
-          authorId: userId,
-          note: payload.notes
+    let reservation: ReservationEntity;
+    try {
+      reservation = await qr.manager.save(ReservationEntity,
+        this.reservationRepository.create({
+          patientId,
+          providerId: payload.provider_id ?? null,
+          startTime,
+          endTime,
+          status: ReservationStatus.CREATED,
+          version: 1
         })
       );
+
+      await this.scopePolicyService.ensureDefaultClinicReservationScope(reservation.id, qr.manager);
+      await this.scopePolicyService.assignReservationDefaultScopeFromActor(userId, reservation.id, roles, qr.manager);
+
+      if (payload.notes) {
+        await qr.manager.save(ReservationNoteEntity,
+          this.noteRepository.create({
+            reservationId: reservation.id,
+            authorId: userId,
+            note: payload.notes
+          })
+        );
+      }
+
+      await qr.manager.save(ReservationStateTransitionEntity,
+        this.transitionRepository.create({
+          reservationId: reservation.id,
+          fromStatus: 'NONE',
+          toStatus: ReservationStatus.CREATED,
+          action: 'CREATE',
+          actorId: userId,
+          reason: null,
+          metadata: {
+            start_time: reservation.startTime?.toISOString(),
+            end_time: reservation.endTime?.toISOString()
+          }
+        })
+      );
+
+      await qr.commitTransaction();
+    } catch (err) {
+      await qr.rollbackTransaction();
+      throw err;
+    } finally {
+      await qr.release();
     }
 
-    await this.appendTransition(reservation.id, null, ReservationStatus.CREATED, 'CREATE', userId, null, {
-      start_time: reservation.startTime?.toISOString(),
-      end_time: reservation.endTime?.toISOString()
-    });
+    const createAccessBasis: AccessBasis = isOpsAdmin ? 'ops_admin' : isStaff ? 'staff' : 'self';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'reservation',
+          entityId: reservation.id,
+          action: 'reservation.create',
+          actorId: userId,
+          accessBasis: createAccessBasis,
+          filters: {
+            patient_id: patientId,
+            provider_id: payload.provider_id ?? null,
+            from_status: null,
+            to_status: ReservationStatus.CREATED
+          },
+          outcome: 'success'
+        },
+        {
+          start_time: reservation.startTime?.toISOString(),
+          end_time: reservation.endTime?.toISOString()
+        }
+      )
+    );
 
     return this.toReservationResponse(reservation);
   }
@@ -169,6 +219,35 @@ export class ReservationService {
     qb.skip((query.page - 1) * query.page_size).take(query.page_size);
     const [items, total] = await qb.getManyAndCount();
 
+    const accessBasis: AccessBasis = hasOpsAdmin
+      ? 'ops_admin'
+      : hasStaff
+        ? 'staff'
+        : hasMerchant
+          ? 'merchant'
+          : hasProvider
+            ? 'provider'
+            : 'self';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        action: 'reservation.list',
+        actorId: userId,
+        entityType: 'reservation',
+        entityId: null,
+        accessBasis,
+        filters: {
+          ...(query.status ? { status: query.status } : {}),
+          ...(query.patient_id ? { patient_id: query.patient_id } : {}),
+          ...(query.provider_id ? { provider_id: query.provider_id } : {}),
+          ...(query.from ? { from: query.from } : {}),
+          ...(query.to ? { to: query.to } : {}),
+          result_total: total
+        },
+        outcome: 'success'
+      })
+    );
+
     return {
       items: items.map((reservation) => this.toReservationResponse(reservation)),
       page: query.page,
@@ -179,6 +258,21 @@ export class ReservationService {
 
   async getReservationById(userId: string, reservationId: string): Promise<Record<string, unknown>> {
     const reservation = await this.getScopedReservation(userId, reservationId);
+    const roles = await this.scopePolicyService.getRoles(userId);
+    const accessBasis = this.reservationPrivilegedAccessBasis(roles, reservation, userId);
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        action: 'reservation.read',
+        actorId: userId,
+        entityType: 'reservation',
+        entityId: reservation.id,
+        accessBasis,
+        filters: { reservation_id: reservation.id },
+        outcome: 'success'
+      })
+    );
+
     return {
       ...this.toReservationResponse(reservation),
       refund_preview: computeReservationRefund(reservation.startTime)
@@ -200,18 +294,23 @@ export class ReservationService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'reservation',
-      entityId: reservation.id,
-      action: 'reservation.note.create',
-      actorId: userId,
-      payload: {
-        note_id: saved.id,
-        reservation_id: reservation.id,
-        author_id: userId,
-        note_length: saved.note.length
-      }
-    });
+    const roles = await this.scopePolicyService.getRoles(userId);
+    const noteAccessBasis = this.reservationPrivilegedAccessBasis(roles, reservation, userId);
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'reservation',
+          entityId: reservation.id,
+          action: 'reservation.note.create',
+          actorId: userId,
+          accessBasis: noteAccessBasis,
+          filters: { reservation_id: reservation.id, note_id: saved.id },
+          outcome: 'success'
+        },
+        { author_id: userId, note_length: saved.note.length }
+      )
+    );
 
     return {
       note_id: saved.id,
@@ -274,13 +373,22 @@ export class ReservationService {
       await qr.release();
     }
 
-    await this.auditService.appendLog({
-      entityType: 'reservation',
-      entityId: updated.id,
-      action: 'reservation.confirm',
-      actorId: userId,
-      payload: { from_status: fromStatus, to_status: updated.status, reason: null }
-    });
+    const accessBasis = this.reservationPrivilegedAccessBasis(roles, updated, userId);
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'reservation',
+          entityId: updated.id,
+          action: 'reservation.confirm',
+          actorId: userId,
+          accessBasis,
+          filters: { reservation_id: updated.id, from_status: fromStatus, to_status: updated.status },
+          outcome: 'success'
+        },
+        { reason: null }
+      )
+    );
 
     return this.toReservationResponse(updated);
   }
@@ -301,7 +409,7 @@ export class ReservationService {
       throw new AppException('FORBIDDEN', 'Insufficient permissions', {}, 403);
     }
 
-    if (reservation.status !== ReservationStatus.CONFIRMED) {
+    if (![ReservationStatus.CONFIRMED, ReservationStatus.RESCHEDULED].includes(reservation.status)) {
       throw new AppException(
         'RESERVATION_INVALID_STATE',
         'Reservation cannot be rescheduled from current state',
@@ -328,6 +436,7 @@ export class ReservationService {
     const previousStartTime = reservation.startTime?.toISOString();
     const previousEndTime = reservation.endTime?.toISOString();
     let updated: ReservationEntity;
+    let fromStatus = reservation.status;
 
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
@@ -340,8 +449,10 @@ export class ReservationService {
       if (!locked || locked.version !== reservation.version) {
         throw new AppException('RESERVATION_CONCURRENT_MODIFICATION', 'Reservation was concurrently modified', {}, 409);
       }
+      fromStatus = locked.status;
       locked.startTime = newStartTime;
       locked.endTime = newEndTime;
+      locked.status = ReservationStatus.RESCHEDULED;
       locked.version += 1;
       updated = await qr.manager.save(ReservationEntity, locked);
       const metadata = {
@@ -352,7 +463,7 @@ export class ReservationService {
       };
       await qr.manager.save(ReservationStateTransitionEntity, this.transitionRepository.create({
         reservationId: updated.id,
-        fromStatus: updated.status,
+        fromStatus,
         toStatus: updated.status,
         action: 'RESCHEDULE',
         actorId: userId,
@@ -367,21 +478,32 @@ export class ReservationService {
       await qr.release();
     }
 
-    await this.auditService.appendLog({
-      entityType: 'reservation',
-      entityId: updated.id,
-      action: 'reservation.reschedule',
-      actorId: userId,
-      payload: {
-        from_status: updated.status,
-        to_status: updated.status,
-        reason: payload.reason,
-        from_start_time: previousStartTime,
-        from_end_time: previousEndTime,
-        to_start_time: updated.startTime?.toISOString(),
-        to_end_time: updated.endTime?.toISOString()
-      }
-    });
+    const rescheduleAccessBasis = this.reservationPrivilegedAccessBasis(roles, updated, userId);
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'reservation',
+          entityId: updated.id,
+          action: 'reservation.reschedule',
+          actorId: userId,
+          accessBasis: rescheduleAccessBasis,
+          filters: {
+            reservation_id: updated.id,
+            from_status: fromStatus,
+            to_status: updated.status
+          },
+          outcome: 'success'
+        },
+        {
+          reason: payload.reason,
+          from_start_time: previousStartTime,
+          from_end_time: previousEndTime,
+          to_start_time: updated.startTime?.toISOString(),
+          to_end_time: updated.endTime?.toISOString()
+        }
+      )
+    );
 
     return this.toReservationResponse(updated);
   }
@@ -402,7 +524,7 @@ export class ReservationService {
       throw new AppException('FORBIDDEN', 'Insufficient permissions', {}, 403);
     }
 
-    if (![ReservationStatus.CREATED, ReservationStatus.CONFIRMED].includes(reservation.status)) {
+    if (![ReservationStatus.CREATED, ReservationStatus.CONFIRMED, ReservationStatus.RESCHEDULED].includes(reservation.status)) {
       throw new AppException(
         'RESERVATION_INVALID_STATE',
         'Reservation cannot be cancelled from current state',
@@ -448,19 +570,28 @@ export class ReservationService {
       await qr.release();
     }
 
-    await this.auditService.appendLog({
-      entityType: 'reservation',
-      entityId: updated.id,
-      action: 'reservation.cancel',
-      actorId: userId,
-      payload: {
-        from_status: fromStatus,
-        to_status: updated.status,
-        reason: payload.reason,
-        refund_percentage: refund.refund_percentage,
-        refund_status: refund.refund_status
-      }
-    });
+    const cancelAccessBasis = this.reservationPrivilegedAccessBasis(roles, updated, userId);
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'reservation',
+          entityId: updated.id,
+          action: 'reservation.cancel',
+          actorId: userId,
+          accessBasis: cancelAccessBasis,
+          filters: {
+            reservation_id: updated.id,
+            from_status: fromStatus,
+            to_status: updated.status,
+            refund_percentage: refund.refund_percentage,
+            refund_status: refund.refund_status
+          },
+          outcome: 'success'
+        },
+        { reason: payload.reason }
+      )
+    );
 
     return this.toReservationResponse(updated);
   }
@@ -473,7 +604,7 @@ export class ReservationService {
       throw new AppException('FORBIDDEN', 'Insufficient permissions', {}, 403);
     }
 
-    if (reservation.status !== ReservationStatus.CONFIRMED) {
+    if (![ReservationStatus.CONFIRMED, ReservationStatus.RESCHEDULED].includes(reservation.status)) {
       throw new AppException(
         'RESERVATION_INVALID_STATE',
         'Reservation cannot be completed from current state',
@@ -516,13 +647,22 @@ export class ReservationService {
       await qr.release();
     }
 
-    await this.auditService.appendLog({
-      entityType: 'reservation',
-      entityId: updated.id,
-      action: 'reservation.complete',
-      actorId: userId,
-      payload: { from_status: fromStatus, to_status: updated.status, reason: null }
-    });
+    const completeAccessBasis = this.reservationPrivilegedAccessBasis(roles, updated, userId);
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'reservation',
+          entityId: updated.id,
+          action: 'reservation.complete',
+          actorId: userId,
+          accessBasis: completeAccessBasis,
+          filters: { reservation_id: updated.id, from_status: fromStatus, to_status: updated.status },
+          outcome: 'success'
+        },
+        { reason: null }
+      )
+    );
 
     return this.toReservationResponse(updated);
   }
@@ -543,6 +683,29 @@ export class ReservationService {
   async isOpsAdmin(userId: string): Promise<boolean> {
     const roles = await this.scopePolicyService.getRoles(userId);
     return roles.includes('ops_admin');
+  }
+
+  private reservationPrivilegedAccessBasis(
+    roles: string[],
+    reservation: ReservationEntity,
+    userId: string
+  ): AccessBasis {
+    if (roles.includes('ops_admin')) {
+      return 'ops_admin';
+    }
+    if (roles.includes('staff')) {
+      return 'staff';
+    }
+    if (roles.includes('provider') && reservation.providerId === userId) {
+      return 'provider';
+    }
+    if (roles.includes('merchant')) {
+      return 'merchant';
+    }
+    if (reservation.patientId === userId) {
+      return 'self';
+    }
+    return 'permission_based';
   }
 
   private async getScopedReservation(userId: string, reservationId: string): Promise<ReservationEntity> {

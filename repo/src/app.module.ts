@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -28,7 +28,14 @@ import { IdempotencyModule } from './modules/idempotency/idempotency.module';
       envFilePath: '.env',
       validate: validateEnv
     }),
-    ThrottlerModule.forRoot([{ ttl: 60000, limit: 120 }]),
+    ThrottlerModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ([{
+        ttl: config.get<number>('THROTTLE_TTL') ?? 60000,
+        limit: config.get<number>('THROTTLE_LIMIT') ?? 120
+      }])
+    }),
     ScheduleModule.forRoot(),
     TypeOrmModule.forRootAsync(typeOrmAsyncConfig),
     IdempotencyModule,

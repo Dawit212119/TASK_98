@@ -1,9 +1,11 @@
 import { Controller, Get, HttpStatus, UseGuards } from '@nestjs/common';
 import { ApiOkResponse, ApiOperation, ApiTags, ApiUnprocessableEntityResponse, ApiBearerAuth, ApiForbiddenResponse } from '@nestjs/swagger';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { RequirePermissions } from '../../common/decorators/permissions.decorator';
 import { AppException } from '../../common/exceptions/app.exception';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
-import { RequirePermissions } from '../../common/decorators/permissions.decorator';
+import { AuthenticatedUser } from '../../common/types/request-with-context';
 import { HealthService } from './health.service';
 
 @Controller('health')
@@ -28,7 +30,8 @@ export class HealthController {
   @ApiBearerAuth()
   @ApiUnprocessableEntityResponse({ description: 'Sample AppException payload' })
   @ApiForbiddenResponse({ description: 'Insufficient permissions (requires debug.health.view)' })
-  getErrorSample(): never {
+  async getErrorSample(@CurrentUser() user: AuthenticatedUser): Promise<never> {
+    await this.healthService.auditDebugAccess(user.userId);
     throw new AppException('SAMPLE_ERROR', 'Sample error for testing', { sample: true }, HttpStatus.UNPROCESSABLE_ENTITY);
   }
 }

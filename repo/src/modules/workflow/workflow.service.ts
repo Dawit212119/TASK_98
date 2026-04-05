@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
 import { AppException } from '../../common/exceptions/app.exception';
 import { AccessControlService } from '../access-control/access-control.service';
+import { AccessBasis, buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { AuditService } from '../audit/audit.service';
 import { ApproveWorkflowRequestDto, RejectWorkflowRequestDto } from './dto/workflow-action.dto';
 import { CreateWorkflowDefinitionDto } from './dto/create-workflow-definition.dto';
@@ -77,17 +78,24 @@ export class WorkflowService {
 
       await queryRunner.commitTransaction();
 
-      await this.auditService.appendLog({
-        entityType: 'workflow_definition',
-        entityId: definition.id,
-        action: 'workflow.definition.create',
-        actorId: userId,
-        payload: {
-          approval_mode: definition.approvalMode,
-          sla_hours: definition.slaHours,
-          steps: savedSteps.length
-        }
-      });
+      await this.auditService.appendLog(
+        buildPrivilegedAuditPayload(
+          {
+            entityType: 'workflow_definition',
+            entityId: definition.id,
+            action: 'workflow.definition.create',
+            actorId: userId,
+            accessBasis: 'ops_admin',
+            filters: {},
+            outcome: 'success'
+          },
+          {
+            approval_mode: definition.approvalMode,
+            sla_hours: definition.slaHours,
+            steps: savedSteps.length
+          }
+        )
+      );
 
       return {
         workflow_definition_id: definition.id,
@@ -153,17 +161,32 @@ export class WorkflowService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'workflow_request',
-      entityId: request.id,
-      action: 'workflow.request.create',
-      actorId: userId,
-      payload: {
-        resource_type: request.resourceType,
-        resource_ref: request.resourceRef,
-        current_step_order: request.currentStepOrder
-      }
-    });
+    const submitAccessBasis: AccessBasis = roles.includes('ops_admin')
+      ? 'ops_admin'
+      : roles.includes('staff')
+        ? 'staff'
+        : 'provider';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'workflow_request',
+          entityId: request.id,
+          action: 'workflow.request.create',
+          actorId: userId,
+          accessBasis: submitAccessBasis,
+          filters: {
+            workflow_definition_id: request.workflowDefinitionId,
+            resource_type: request.resourceType
+          },
+          outcome: 'success'
+        },
+        {
+          resource_ref: request.resourceRef,
+          current_step_order: request.currentStepOrder
+        }
+      )
+    );
 
     return this.mapRequest(request, definition.approvalMode);
   }
@@ -244,16 +267,30 @@ export class WorkflowService {
       await qr.release();
     }
 
-    await this.auditService.appendLog({
-      entityType: 'workflow_request',
-      entityId: request.id,
-      action: 'workflow.request.approve',
-      actorId: userId,
-      payload: {
-        step_order: request.currentStepOrder,
-        status: request.status
-      }
-    });
+    const approveAccessBasis = this.workflowActionAccessBasis(roles);
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'workflow_request',
+          entityId: request.id,
+          action: 'workflow.request.approve',
+          actorId: userId,
+          accessBasis: approveAccessBasis,
+          filters: {
+            request_id: request.id,
+            workflow_definition_id: request.workflowDefinitionId,
+            current_step_order: request.currentStepOrder,
+            request_status: request.status
+          },
+          outcome: 'success'
+        },
+        {
+          step_order: request.currentStepOrder,
+          status: request.status
+        }
+      )
+    );
 
     return this.mapRequest(request, definition.approvalMode);
   }
@@ -306,18 +343,42 @@ export class WorkflowService {
       await qr.release();
     }
 
-    await this.auditService.appendLog({
-      entityType: 'workflow_request',
-      entityId: request.id,
-      action: 'workflow.request.reject',
-      actorId: userId,
-      payload: {
-        step_order: request.currentStepOrder,
-        reason: payload.reason
-      }
-    });
+    const rejectAccessBasis = this.workflowActionAccessBasis(roles);
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'workflow_request',
+          entityId: request.id,
+          action: 'workflow.request.reject',
+          actorId: userId,
+          accessBasis: rejectAccessBasis,
+          filters: {
+            request_id: request.id,
+            workflow_definition_id: request.workflowDefinitionId,
+            current_step_order: request.currentStepOrder,
+            request_status: request.status
+          },
+          outcome: 'success'
+        },
+        { reason: payload.reason }
+      )
+    );
 
     return this.mapRequest(request, definition.approvalMode);
+  }
+
+  private workflowActionAccessBasis(roles: string[]): AccessBasis {
+    if (roles.includes('ops_admin')) {
+      return 'ops_admin';
+    }
+    if (roles.includes('staff')) {
+      return 'staff';
+    }
+    if (roles.includes('provider')) {
+      return 'provider';
+    }
+    return 'permission_based';
   }
 
   private async requireOpsAdmin(userId: string): Promise<void> {

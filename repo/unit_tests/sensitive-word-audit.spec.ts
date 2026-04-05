@@ -57,7 +57,9 @@ describe('SensitiveWordService.listSensitiveWords — audit logging', () => {
         entityType: 'sensitive_word',
         actorId: OPS_ADMIN_ID,
         payload: expect.objectContaining({
-          filter_active: null,
+          access_basis: 'ops_admin',
+          outcome: 'success',
+          filters: { filter_active: null },
           result_count: sampleWords.length
         })
       })
@@ -73,7 +75,9 @@ describe('SensitiveWordService.listSensitiveWords — audit logging', () => {
     expect(auditService.appendLog).toHaveBeenCalledWith(
       expect.objectContaining({
         payload: expect.objectContaining({
-          filter_active: 'true',
+          access_basis: 'ops_admin',
+          outcome: 'success',
+          filters: { filter_active: 'true' },
           result_count: activeOnly.length
         })
       })
@@ -87,7 +91,11 @@ describe('SensitiveWordService.listSensitiveWords — audit logging', () => {
 
     expect(auditService.appendLog).toHaveBeenCalledWith(
       expect.objectContaining({
-        payload: expect.objectContaining({ result_count: 0 })
+        payload: expect.objectContaining({
+          access_basis: 'ops_admin',
+          filters: { filter_active: 'false' },
+          result_count: 0
+        })
       })
     );
   });

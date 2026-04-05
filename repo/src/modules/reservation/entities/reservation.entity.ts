@@ -3,6 +3,7 @@ import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateCol
 export enum ReservationStatus {
   CREATED = 'CREATED',
   CONFIRMED = 'CONFIRMED',
+  RESCHEDULED = 'RESCHEDULED',
   CANCELLED = 'CANCELLED',
   COMPLETED = 'COMPLETED'
 }

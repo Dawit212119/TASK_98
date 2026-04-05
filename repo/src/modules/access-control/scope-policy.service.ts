@@ -34,7 +34,7 @@ export class ScopePolicyService {
     return [...new Set(rows.map((row) => row.scopeId))];
   }
 
-  async assignReservationDefaultScopeFromActor(actorUserId: string, reservationId: string, roles?: string[]): Promise<void> {
+  async assignReservationDefaultScopeFromActor(actorUserId: string, reservationId: string, roles?: string[], manager?: import('typeorm').EntityManager): Promise<void> {
     const roleSet = roles ?? (await this.getRoles(actorUserId));
     if (!roleSet.includes('staff') && !roleSet.includes('merchant')) {
       return;
@@ -50,7 +50,8 @@ export class ScopePolicyService {
       );
     }
 
-    const existing = await this.reservationDataScopeRepository.findOne({
+    const repo = manager ? manager.getRepository(ReservationDataScopeEntity) : this.reservationDataScopeRepository;
+    const existing = await repo.findOne({
       where: {
         reservationId,
         scopeId: scopeIds[0],
@@ -58,8 +59,8 @@ export class ScopePolicyService {
       }
     });
     if (!existing) {
-      await this.reservationDataScopeRepository.save(
-        this.reservationDataScopeRepository.create({
+      await repo.save(
+        repo.create({
           reservationId,
           scopeId: scopeIds[0]
         })
@@ -71,7 +72,7 @@ export class ScopePolicyService {
    * Tags new reservations with the default clinic data scope so staff/merchant (and migration-era behavior) stay aligned.
    * Patient-created rows previously had no reservation_data_scopes until this hook.
    */
-  async ensureDefaultClinicReservationScope(reservationId: string): Promise<void> {
+  async ensureDefaultClinicReservationScope(reservationId: string, manager?: import('typeorm').EntityManager): Promise<void> {
     const scope = await this.dataScopeRepository.findOne({
       where: { scopeKey: DEFAULT_CLINIC_SCOPE_KEY, deletedAt: IsNull() }
     });
@@ -79,15 +80,16 @@ export class ScopePolicyService {
       return;
     }
 
-    const existing = await this.reservationDataScopeRepository.findOne({
+    const repo = manager ? manager.getRepository(ReservationDataScopeEntity) : this.reservationDataScopeRepository;
+    const existing = await repo.findOne({
       where: { reservationId, scopeId: scope.id, deletedAt: IsNull() }
     });
     if (existing) {
       return;
     }
 
-    await this.reservationDataScopeRepository.save(
-      this.reservationDataScopeRepository.create({
+    await repo.save(
+      repo.create({
         reservationId,
         scopeId: scope.id
       })

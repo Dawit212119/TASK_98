@@ -5,6 +5,7 @@ import { AppException } from '../../common/exceptions/app.exception';
 import { AccessControlService } from '../access-control/access-control.service';
 import { ScopePolicyService } from '../access-control/scope-policy.service';
 import { AuditService } from '../audit/audit.service';
+import { AccessBasis, buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { ReservationEntity } from '../reservation/entities/reservation.entity';
 import { AdherenceQueryDto } from './dto/adherence-query.dto';
 import { CreatePlanDto } from './dto/create-plan.dto';
@@ -40,7 +41,7 @@ export class FollowUpService {
   ) {}
 
   async ingestTags(userId: string, payload: IngestTagsDto): Promise<Record<string, unknown>> {
-    await this.requireAnyRole(userId, ['provider', 'staff', 'merchant']);
+    await this.requireAnyRole(userId, ['provider', 'staff']);
     const reservation = await this.ensureReservationExists(payload.reservation_id);
     await this.scopePolicyService.assertReservationInScope(userId, reservation);
 
@@ -56,16 +57,25 @@ export class FollowUpService {
 
     const saved = await this.tagRepository.save(entities);
 
-    await this.auditService.appendLog({
-      entityType: 'follow_up_tag',
-      entityId: payload.reservation_id,
-      action: 'follow_up.tags.ingest',
-      actorId: userId,
-      payload: {
-        reservation_id: payload.reservation_id,
-        tags_count: saved.length
-      }
-    });
+    const roles = await this.scopePolicyService.getRoles(userId);
+    const accessBasis: AccessBasis = roles.includes('staff') ? 'staff' : 'provider';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'follow_up_tag',
+          entityId: payload.reservation_id,
+          action: 'follow_up.tags.ingest',
+          actorId: userId,
+          accessBasis,
+          filters: { reservation_id: payload.reservation_id },
+          outcome: 'success'
+        },
+        { tags_count: saved.length }
+      )
+    );
+
+    const autoCreatedPlanIds = await this.maybeInstantiatePlansFromTagIngest(userId, reservation);
 
     return {
       reservation_id: payload.reservation_id,
@@ -75,7 +85,8 @@ export class FollowUpService {
         value: item.value,
         source: item.source,
         created_at: item.createdAt.toISOString()
-      }))
+      })),
+      auto_created_plan_ids: autoCreatedPlanIds
     };
   }
 
@@ -105,16 +116,27 @@ export class FollowUpService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'follow_up_plan_template',
-      entityId: template.id,
-      action: 'follow_up.plan_template.create',
-      actorId: userId,
-      payload: {
-        task_rules_count: payload.task_rules.length,
-        active: payload.active
-      }
-    });
+    const tmplAccessBasis: AccessBasis = (await this.scopePolicyService.getRoles(userId)).includes('staff')
+      ? 'staff'
+      : 'provider';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'follow_up_plan_template',
+          entityId: template.id,
+          action: 'follow_up.plan_template.create',
+          actorId: userId,
+          accessBasis: tmplAccessBasis,
+          filters: { template_id: template.id },
+          outcome: 'success'
+        },
+        {
+          task_rules_count: payload.task_rules.length,
+          active: payload.active
+        }
+      )
+    );
 
     return {
       template_id: template.id,
@@ -167,7 +189,7 @@ export class FollowUpService {
       throw new AppException('FOLLOW_UP_TEMPLATE_NOT_FOUND', 'Plan template not found', {}, 404);
     }
 
-    const startDate = new Date(`${payload.start_date}T00:00:00.000Z`);
+    const normalizedStartDate = this.normalizeStartDate(payload.start_date);
     const taskRows: FollowUpTaskEntity[] = [];
 
     let plan: FollowUpPlanEntity;
@@ -181,13 +203,13 @@ export class FollowUpService {
         patientId: payload.patient_id,
         reservationId: payload.reservation_id ?? null,
         templateId: template.id,
-        startDate: payload.start_date,
+        startDate: normalizedStartDate.dateOnly,
         status: FollowUpPlanStatus.ACTIVE,
         createdBy: userId
       }));
 
       for (const rule of template.taskRules) {
-        const schedules = buildSchedules(startDate, rule);
+        const schedules = buildSchedules(normalizedStartDate.anchorDate, rule);
         for (const schedule of schedules) {
           taskRows.push(
             this.taskRepository.create({
@@ -213,17 +235,25 @@ export class FollowUpService {
       await qr.release();
     }
 
-    await this.auditService.appendLog({
-      entityType: 'follow_up_plan',
-      entityId: plan.id,
-      action: 'follow_up.plan.create',
-      actorId: userId,
-      payload: {
-        patient_id: payload.patient_id,
-        reservation_id: payload.reservation_id ?? null,
-        tasks_generated: tasks.length
-      }
-    });
+    const planAccessBasis: AccessBasis = roles.includes('staff') ? 'staff' : 'provider';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'follow_up_plan',
+          entityId: plan.id,
+          action: 'follow_up.plan.create',
+          actorId: userId,
+          accessBasis: planAccessBasis,
+          filters: {
+            patient_id: payload.patient_id,
+            reservation_id: payload.reservation_id ?? null
+          },
+          outcome: 'success'
+        },
+        { tasks_generated: tasks.length }
+      )
+    );
 
     return {
       plan_id: plan.id,
@@ -250,6 +280,33 @@ export class FollowUpService {
       where: { planId: plan.id, deletedAt: IsNull() },
       order: { dueAt: 'ASC', sequenceNo: 'ASC' }
     });
+
+    const hasOpsAdmin = roles.includes('ops_admin');
+    const hasStaff = roles.includes('staff');
+    const hasProvider = roles.includes('provider');
+    const planReadBasis: AccessBasis = hasOpsAdmin
+      ? 'ops_admin'
+      : hasStaff
+        ? 'staff'
+        : hasProvider
+          ? 'provider'
+          : 'self';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        action: 'follow_up.plan.read',
+        actorId: userId,
+        entityType: 'follow_up_plan',
+        entityId: plan.id,
+        accessBasis: planReadBasis,
+        filters: {
+          plan_id: plan.id,
+          ...(plan.reservationId ? { reservation_id: plan.reservationId } : {}),
+          patient_id: plan.patientId
+        },
+        outcome: 'success'
+      })
+    );
 
     return {
       plan_id: plan.id,
@@ -293,17 +350,25 @@ export class FollowUpService {
     task.version += 1;
     await this.taskRepository.save(task);
 
-    await this.auditService.appendLog({
-      entityType: 'follow_up_outcome',
-      entityId: outcome.id,
-      action: 'follow_up.task.outcome.record',
-      actorId: userId,
-      payload: {
-        task_id: taskId,
-        status: payload.status,
-        adherence_score: payload.adherence_score
-      }
-    });
+    const outcomeAccessBasis: AccessBasis = roles.includes('staff') ? 'staff' : 'provider';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'follow_up_outcome',
+          entityId: outcome.id,
+          action: 'follow_up.task.outcome.record',
+          actorId: userId,
+          accessBasis: outcomeAccessBasis,
+          filters: { task_id: taskId, plan_id: plan.id },
+          outcome: 'success'
+        },
+        {
+          status: payload.status,
+          adherence_score: payload.adherence_score
+        }
+      )
+    );
 
     return {
       outcome_id: outcome.id,
@@ -362,7 +427,9 @@ export class FollowUpService {
         scopeClauses.push('p.created_by = :scopeUserId');
       }
       if (hasAnalyticsViewer) {
-        scopeClauses.push('p.id IS NOT NULL');
+        // analytics_viewer must supply explicit filters (patient_id/provider_id);
+        // without them, restrict to plans the viewer created themselves.
+        scopeClauses.push('p.created_by = :scopeUserId');
       }
 
       if (scopeClauses.length === 0) {
@@ -397,6 +464,33 @@ export class FollowUpService {
 
     const totalOutcomes = rows.reduce((sum, row) => sum + Number(row.count), 0);
     const weightedAdherenceSum = rows.reduce((sum, row) => sum + Number(row.count) * Number(row.avg_adherence), 0);
+
+    const accessBasis: AccessBasis = hasOpsAdmin
+      ? 'ops_admin'
+      : hasStaff
+        ? 'staff'
+        : hasProvider
+          ? 'provider'
+          : hasAnalyticsViewer
+            ? 'analytics_viewer'
+            : 'self';
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        action: 'follow_up.adherence.read',
+        actorId: userId,
+        entityType: 'follow_up_adherence',
+        entityId: null,
+        accessBasis,
+        filters: {
+          ...(query.patient_id ? { patient_id: query.patient_id } : {}),
+          ...(query.provider_id ? { provider_id: query.provider_id } : {}),
+          ...(query.from ? { from: query.from } : {}),
+          ...(query.to ? { to: query.to } : {})
+        },
+        outcome: 'success'
+      })
+    );
 
     return {
       total_outcomes: totalOutcomes,
@@ -486,5 +580,114 @@ export class FollowUpService {
     }
 
     throw new AppException('FORBIDDEN', 'Plan is out of scope', {}, 403);
+  }
+
+  /**
+   * When ingested tags satisfy an active template's trigger_tags, create at most one ACTIVE plan
+   * per template per reservation (idempotent).
+   */
+  private async maybeInstantiatePlansFromTagIngest(
+    userId: string,
+    reservation: ReservationEntity
+  ): Promise<string[]> {
+    if (!reservation.patientId) {
+      return [];
+    }
+
+    const allTags = await this.tagRepository.find({
+      where: { reservationId: reservation.id, deletedAt: IsNull() }
+    });
+
+    const templates = await this.templateRepository.find({
+      where: { active: true, deletedAt: IsNull() }
+    });
+
+    const startDate = new Date().toISOString().slice(0, 10);
+    const created: string[] = [];
+
+    for (const template of templates) {
+      if (!this.reservationTagsMatchTemplateTriggers(allTags, template.triggerTags)) {
+        continue;
+      }
+
+      const existing = await this.planRepository.findOne({
+        where: {
+          reservationId: reservation.id,
+          templateId: template.id,
+          status: FollowUpPlanStatus.ACTIVE,
+          deletedAt: IsNull()
+        }
+      });
+      if (existing) {
+        continue;
+      }
+
+      try {
+        const row = await this.createPlan(userId, {
+          patient_id: reservation.patientId,
+          reservation_id: reservation.id,
+          template_id: template.id,
+          start_date: startDate
+        });
+        const planId = row.plan_id;
+        if (typeof planId === 'string') {
+          created.push(planId);
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return created;
+  }
+
+  private reservationTagsMatchTemplateTriggers(
+    tags: FollowUpTagEntity[],
+    triggers: Array<{ key: string; value?: string }>
+  ): boolean {
+    if (!triggers.length) {
+      return false;
+    }
+
+    for (const tr of triggers) {
+      const valueRequired = tr.value !== undefined && tr.value !== null && String(tr.value).length > 0;
+      const matched = tags.some((tag) => {
+        if (tag.key !== tr.key) {
+          return false;
+        }
+        if (valueRequired) {
+          return tag.value === String(tr.value);
+        }
+        return true;
+      });
+      if (!matched) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private normalizeStartDate(input: string): { dateOnly: string; anchorDate: Date } {
+    const raw = input.trim();
+    let dateOnly = raw;
+    if (raw.includes('T')) {
+      const parsed = new Date(raw);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new AppException('FOLLOW_UP_INVALID_START_DATE', 'start_date must be a valid ISO date', {}, 422);
+      }
+      dateOnly = parsed.toISOString().slice(0, 10);
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
+      throw new AppException('FOLLOW_UP_INVALID_START_DATE', 'start_date must be a valid ISO date', {}, 422);
+    }
+
+    const anchorDate = new Date(`${dateOnly}T00:00:00.000Z`);
+    if (Number.isNaN(anchorDate.getTime())) {
+      throw new AppException('FOLLOW_UP_INVALID_START_DATE', 'start_date must be a valid ISO date', {}, 422);
+    }
+
+    return { dateOnly, anchorDate };
   }
 }

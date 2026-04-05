@@ -148,6 +148,9 @@ describe('TrustRatingService appeals and privileged read audits', () => {
         entityId: targetUserId,
         actorId: actorStaffId,
         payload: expect.objectContaining({
+          access_basis: 'staff',
+          outcome: 'success',
+          filters: {},
           target_user_id: targetUserId,
           tier: 'SILVER',
           had_record: true,
@@ -239,11 +242,17 @@ describe('TrustRatingService appeals and privileged read audits', () => {
         entityType: 'fraud_flag_query',
         actorId: actorOpsId,
         payload: expect.objectContaining({
-          filters: { user_id: targetUserId, from: null, to: null },
-          result_total: 12,
-          returned_count: 1,
-          page: 1,
-          page_size: 5
+          access_basis: 'ops_admin',
+          outcome: 'success',
+          filters: expect.objectContaining({
+            user_id: targetUserId,
+            from: null,
+            to: null,
+            result_total: 12,
+            returned_count: 1,
+            page: 1,
+            page_size: 5
+          })
         })
       })
     );

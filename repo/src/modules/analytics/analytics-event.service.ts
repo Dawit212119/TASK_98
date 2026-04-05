@@ -2,21 +2,26 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AccessControlService } from '../access-control/access-control.service';
+import { AuditService } from '../audit/audit.service';
 import { AnalyticsEventEntity } from './entities/analytics-event.entity';
 import { IngestEventDto } from './dto/ingest-event.dto';
 import { FunnelQueryDto } from './dto/funnel-query.dto';
 import { RetentionQueryDto } from './dto/retention-query.dto';
 import { AppException } from '../../common/exceptions/app.exception';
+import { buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 
 @Injectable()
 export class AnalyticsEventService {
   constructor(
     private readonly accessControlService: AccessControlService,
+    private readonly auditService: AuditService,
     @InjectRepository(AnalyticsEventEntity)
     private readonly eventRepository: Repository<AnalyticsEventEntity>
   ) {}
 
   async ingestEvent(userId: string, payload: IngestEventDto): Promise<Record<string, unknown>> {
+    await this.requireAnalyticsWrite(userId);
+
     const event = await this.eventRepository.save(
       this.eventRepository.create({
         actorId: userId,
@@ -27,6 +32,28 @@ export class AnalyticsEventService {
         metadata: payload.metadata
       })
     );
+
+    if (this.shouldAudit(userId)) {
+      await this.auditService.appendLog(
+        buildPrivilegedAuditPayload(
+          {
+            entityType: 'analytics_event',
+            entityId: event.id,
+            action: 'analytics.event.ingest',
+            actorId: userId,
+            accessBasis: 'permission_based',
+            filters: {},
+            outcome: 'success'
+          },
+          {
+            event_type: event.eventType,
+            subject_type: event.subjectType,
+            subject_id: event.subjectId,
+            occurred_at: event.occurredAt.toISOString()
+          }
+        )
+      );
+    }
 
     return {
       event_id: event.id,
@@ -64,6 +91,27 @@ export class AnalyticsEventService {
     const firstCount = stageCounts[0].count;
     const conversionRate = firstCount > 0 ? Number(((stageCounts[3].count / firstCount) * 100).toFixed(2)) : 0;
 
+    if (this.shouldAudit(userId)) {
+      await this.auditService.appendLog(
+        buildPrivilegedAuditPayload(
+          {
+            entityType: 'analytics_aggregation',
+            entityId: null,
+            action: 'analytics.funnel.read',
+            actorId: userId,
+            accessBasis: 'permission_based',
+            filters: {
+              from: query.from,
+              to: query.to,
+              subject_type: query.subject_type ?? null
+            },
+            outcome: 'success'
+          },
+          { stage_counts: stageCounts, conversion_rate_percent: conversionRate }
+        )
+      );
+    }
+
     return {
       from: query.from,
       to: query.to,
@@ -96,6 +144,31 @@ export class AnalyticsEventService {
     const cohortSize = Number(cohortRows?.cohort_size ?? 0);
     const activeSize = Number(activeRows?.active_size ?? 0);
     const retentionRate = cohortSize > 0 ? Number(((activeSize / cohortSize) * 100).toFixed(2)) : 0;
+
+    if (this.shouldAudit(userId)) {
+      await this.auditService.appendLog(
+        buildPrivilegedAuditPayload(
+          {
+            entityType: 'analytics_aggregation',
+            entityId: null,
+            action: 'analytics.retention.read',
+            actorId: userId,
+            accessBasis: 'permission_based',
+            filters: {
+              cohort_start: query.cohort_start,
+              cohort_end: query.cohort_end,
+              bucket: query.bucket ?? 'overall'
+            },
+            outcome: 'success'
+          },
+          {
+            cohort_size: cohortSize,
+            retained_size: activeSize,
+            retention_rate_percent: retentionRate
+          }
+        )
+      );
+    }
 
     return {
       cohort_start: query.cohort_start,
@@ -142,6 +215,39 @@ export class AnalyticsEventService {
       return Number(((count / impressionCount) * 100).toFixed(2));
     };
 
+    const completionRate = toRate(completionCount);
+    const engagementRate = toRate(engagementCount);
+    const shareRate = toRate(shareCount);
+
+    if (this.shouldAudit(userId)) {
+      await this.auditService.appendLog(
+        buildPrivilegedAuditPayload(
+          {
+            entityType: 'analytics_aggregation',
+            entityId: null,
+            action: 'analytics.content_quality.read',
+            actorId: userId,
+            accessBasis: 'permission_based',
+            filters: {
+              from: query.from,
+              to: query.to,
+              subject_type: query.subject_type ?? null
+            },
+            outcome: 'success'
+          },
+          {
+            impression_count: impressionCount,
+            completion_count: completionCount,
+            completion_rate_percent: completionRate,
+            engagement_count: engagementCount,
+            engagement_rate_percent: engagementRate,
+            share_count: shareCount,
+            share_rate_percent: shareRate
+          }
+        )
+      );
+    }
+
     return {
       from: query.from,
       to: query.to,
@@ -149,17 +255,32 @@ export class AnalyticsEventService {
       impression_count: impressionCount,
       completion_metric: {
         completion_count: completionCount,
-        completion_rate_percent: toRate(completionCount)
+        completion_rate_percent: completionRate
       },
       engagement_metric: {
         engagement_count: engagementCount,
-        engagement_rate_percent: toRate(engagementCount)
+        engagement_rate_percent: engagementRate
       },
       share_metric: {
         share_count: shareCount,
-        share_rate_percent: toRate(shareCount)
+        share_rate_percent: shareRate
       }
     };
+  }
+
+  private async requireAnalyticsWrite(userId: string): Promise<void> {
+    if (userId === 'system') {
+      return;
+    }
+    const permissions = await this.accessControlService.getUserPermissions(userId);
+    if (permissions.includes('analytics.api.use')) {
+      return;
+    }
+    const roles = await this.accessControlService.getUserRoleNames(userId);
+    if (roles.includes('ops_admin')) {
+      return;
+    }
+    throw new AppException('FORBIDDEN', 'Insufficient permissions', {}, 403);
   }
 
   private async requireAnalyticsRead(userId: string): Promise<void> {
@@ -175,5 +296,9 @@ export class AnalyticsEventService {
       return;
     }
     throw new AppException('FORBIDDEN', 'Insufficient permissions', {}, 403);
+  }
+
+  private shouldAudit(userId: string): boolean {
+    return userId !== 'system';
   }
 }

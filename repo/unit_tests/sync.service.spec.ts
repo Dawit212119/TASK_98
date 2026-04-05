@@ -136,16 +136,32 @@ const createService = (overrides: {
       id === plan.id ? { ...plan } : null
     ),
     createQueryBuilder: jest.fn(() => {
+      let scopeParams: Record<string, unknown> = {};
+      let scopeSql = '';
       const qb: any = {};
       qb.where = jest.fn(() => qb);
-      qb.andWhere = jest.fn(() => qb);
+      qb.andWhere = jest.fn((sql: string, params?: Record<string, unknown>) => {
+        scopeSql += sql;
+        if (params) Object.assign(scopeParams, params);
+        return qb;
+      });
       qb.setParameter = jest.fn(() => qb);
       qb.select = jest.fn(() => qb);
       qb.orderBy = jest.fn(() => qb);
       qb.addOrderBy = jest.fn(() => qb);
       qb.take = jest.fn(() => qb);
       qb.getMany = jest.fn(async () => [{ ...plan }]);
-      qb.getRawMany = jest.fn(async () => [{ id: plan.id }]);
+      qb.getRawMany = jest.fn(async () => {
+        // Apply patient_id scope filter if present
+        if (scopeSql.includes('p.patient_id = :userId') && scopeParams.userId) {
+          const matchesPatient = plan.patientId === scopeParams.userId;
+          const hasScopeClause = scopeSql.includes('reservation_data_scopes');
+          if (!matchesPatient && !hasScopeClause) {
+            return [];
+          }
+        }
+        return [{ id: plan.id }];
+      });
       return qb;
     })
   };
@@ -321,6 +337,38 @@ describe('SyncService — reservation (existing behavior)', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN' } as AppException);
   });
 
+  it('allows reservation UPSERT when status is RESCHEDULED', async () => {
+    const { service } = createService({ reservationOverride: { status: ReservationStatus.RESCHEDULED } });
+
+    const result = await service.pushChanges('user-1', {
+      client_id: 'mobile-1',
+      changes: [
+        {
+          entity_type: 'reservation',
+          entity_id: 'f96a13e0-8af2-40e7-ac71-3c9a19a1b103',
+          operation: 'UPSERT',
+          payload: {
+            start_time: '2026-03-28T12:00:00.000Z',
+            end_time: '2026-03-28T13:00:00.000Z'
+          },
+          base_version: 3,
+          updated_at: '2026-03-28T11:59:00.000Z'
+        }
+      ]
+    });
+
+    expect(result).toMatchObject({
+      conflicts: [],
+      accepted: [
+        expect.objectContaining({
+          entity_type: SyncEntityType.RESERVATION,
+          entity_id: 'f96a13e0-8af2-40e7-ac71-3c9a19a1b103',
+          version: 4
+        })
+      ]
+    });
+  });
+
   it('pushChanges rejects notification push (not supported)', async () => {
     const { service } = createService();
 
@@ -460,6 +508,46 @@ describe('SyncService — follow_up_task push', () => {
       })
     ).rejects.toMatchObject({ code: 'SYNC_ENTITY_PUSH_NOT_SUPPORTED' } as AppException);
   });
+
+  it('rejects follow_up_task push for merchant role', async () => {
+    const { service } = createService({ roles: ['merchant'], scopeIds: ['scope-1'] });
+
+    await expect(
+      service.pushChanges('merchant-user', {
+        client_id: 'mobile-1',
+        changes: [
+          {
+            entity_type: 'follow_up_task',
+            entity_id: followUpTaskBase.id,
+            operation: 'UPSERT',
+            payload: { status: 'DONE' },
+            base_version: 1,
+            updated_at: '2026-04-01T10:00:00.000Z'
+          }
+        ]
+      })
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' } as AppException);
+  });
+
+  it('rejects follow_up_task push for merchant+patient even when plan patient matches', async () => {
+    const { service } = createService({ roles: ['merchant', 'patient'] });
+
+    await expect(
+      service.pushChanges('user-1', {
+        client_id: 'mobile-1',
+        changes: [
+          {
+            entity_type: 'follow_up_task',
+            entity_id: followUpTaskBase.id,
+            operation: 'UPSERT',
+            payload: { status: 'DONE' },
+            base_version: 1,
+            updated_at: '2026-04-01T10:00:00.000Z'
+          }
+        ]
+      })
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' } as AppException);
+  });
 });
 
 // ─── New entity types — pull ──────────────────────────────────────────────────
@@ -492,6 +580,69 @@ describe('SyncService — new entity pull (follow_up_task, workflow_request, rev
 
     expect(result.total).toBe(0);
     expect(result.changes).toEqual([]);
+  });
+
+  it('merchant pull of follow_up_task is hard-denied (FORBIDDEN)', async () => {
+    const { service } = createService({
+      roles: ['merchant'],
+      scopeIds: ['scope-1']
+    });
+
+    await expect(
+      service.pullChanges('merchant-user', {
+        since_updated_at: '2020-01-01T00:00:00.000Z',
+        entity_types: [SyncEntityType.FOLLOW_UP_TASK],
+        page: 1,
+        page_size: 10
+      })
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' } as AppException);
+  });
+
+  it('merchant+patient pull of follow_up_task is hard-denied (FORBIDDEN)', async () => {
+    const { service } = createService({
+      roles: ['merchant', 'patient'],
+      scopeIds: ['scope-1']
+    });
+
+    await expect(
+      service.pullChanges('user-1', {
+        since_updated_at: '2020-01-01T00:00:00.000Z',
+        entity_types: [SyncEntityType.FOLLOW_UP_TASK],
+        page: 1,
+        page_size: 10
+      })
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' } as AppException);
+  });
+
+  it('staff can pull follow_up_task entries (allowed role)', async () => {
+    const { service } = createService({
+      roles: ['staff'],
+      scopeIds: ['scope-1']
+    });
+
+    const result = await service.pullChanges('staff-user', {
+      since_updated_at: '2020-01-01T00:00:00.000Z',
+      entity_types: [SyncEntityType.FOLLOW_UP_TASK],
+      page: 1,
+      page_size: 10
+    });
+
+    expect(result.total).toBeGreaterThanOrEqual(1);
+    const changes = result.changes as Array<Record<string, unknown>>;
+    expect(changes[0]).toMatchObject({ entity_type: SyncEntityType.FOLLOW_UP_TASK });
+  });
+
+  it('patient can pull follow_up_task entries for own plans', async () => {
+    const { service } = createService({ roles: ['patient'] });
+
+    const result = await service.pullChanges('user-1', {
+      since_updated_at: '2020-01-01T00:00:00.000Z',
+      entity_types: [SyncEntityType.FOLLOW_UP_TASK],
+      page: 1,
+      page_size: 10
+    });
+
+    expect(result.total).toBeGreaterThanOrEqual(1);
   });
 
   it('pull handles multiple entity types in one request', async () => {

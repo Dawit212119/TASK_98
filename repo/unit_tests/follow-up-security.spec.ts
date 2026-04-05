@@ -128,6 +128,18 @@ describe('FollowUpService security', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN' } as AppException);
   });
 
+  it('denies follow-up tag ingest for merchant (clinical roles only)', async () => {
+    const { service, accessControlService } = createService();
+    accessControlService.getUserRoleNames.mockResolvedValue(['merchant']);
+
+    await expect(
+      service.ingestTags('merchant-1', {
+        reservation_id: 'res-1',
+        tags: [{ key: 'k', value: 'v', source: 'merchant' }]
+      } as any)
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' } as AppException);
+  });
+
   it('rejects plan creation when patient_id mismatches reservation patient', async () => {
     const { service, accessControlService, scopePolicyService, reservationRepository, templateRepository } = createService();
     accessControlService.getUserRoleNames.mockResolvedValue(['provider']);
@@ -169,7 +181,9 @@ describe('FollowUpService security', () => {
     const result = await service.getAdherenceMetrics('analytics-only', {} as any);
 
     expect(result).toMatchObject({ total_outcomes: 1 });
-    expect(clauses.some((sql) => sql.includes('p.id IS NOT NULL'))).toBe(true);
+    // analytics_viewer is now scoped to created_by (not unrestricted p.id IS NOT NULL)
+    expect(clauses.some((sql) => sql.includes('p.created_by = :scopeUserId'))).toBe(true);
+    expect(clauses.some((sql) => sql.includes('p.id IS NOT NULL'))).toBe(false);
   });
 
   it('rejects adherence metrics for unauthorized role', async () => {
@@ -262,7 +276,15 @@ describe('CommunicationService sensitive word admin auth', () => {
     const result = await service.createSensitiveWord('ops-1', { word: 'hate' });
     expect(result).toMatchObject({ word: 'hate', active: true });
     expect(auditService.appendLog).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'sensitive_word.create', actorId: 'ops-1' })
+      expect.objectContaining({
+        action: 'sensitive_word.create',
+        actorId: 'ops-1',
+        payload: expect.objectContaining({
+          access_basis: 'ops_admin',
+          outcome: 'success',
+          filters: {}
+        })
+      })
     );
   });
 

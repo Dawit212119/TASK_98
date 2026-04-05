@@ -98,6 +98,25 @@ export class AuditService {
     let checkedCount = 0;
     let previousEntryHash: string | null = null;
 
+    // When a bounded window is used, the first in-range row's previous_hash
+    // may reference a record outside the window. Seed the chain from the
+    // predecessor so a valid chain is not falsely flagged as broken.
+    const hasFilters = !!(input?.from || input?.to);
+    if (hasFilters && rows.length > 0) {
+      const firstRow = rows[0]!;
+      if (firstRow.previousHash !== null) {
+        const predecessorQb = this.auditRepository
+          .createQueryBuilder('audit')
+          .where('audit.deleted_at IS NULL')
+          .andWhere('audit.entry_hash = :hash', { hash: firstRow.previousHash })
+          .limit(1);
+        const predecessor = await predecessorQb.getOne();
+        if (predecessor) {
+          previousEntryHash = predecessor.entryHash;
+        }
+      }
+    }
+
     for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i]!;
       checkedCount += 1;

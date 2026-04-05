@@ -1,5 +1,6 @@
 import { IsEnum, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { IsStrongPassword } from '../../../common/validators/strong-password.decorator';
 
 export enum ProvisionableSystemRole {
   STAFF = 'staff',
@@ -18,8 +19,7 @@ export class ProvisionUserDto {
 
   @ApiProperty({ example: 'Password123!' })
   @IsString()
-  @MinLength(8)
-  @MaxLength(200)
+  @IsStrongPassword()
   password!: string;
 
   @ApiProperty({ enum: ProvisionableSystemRole, example: ProvisionableSystemRole.STAFF })

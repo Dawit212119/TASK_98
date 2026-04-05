@@ -285,8 +285,13 @@ export class SyncService {
 
     await this.scopePolicyService.assertReservationInScope(userId, reservation, roles);
 
-    if (reservation.status !== ReservationStatus.CONFIRMED) {
-      throw new AppException('RESERVATION_INVALID_TRANSITION', 'Only CONFIRMED reservations can be updated via sync', {}, 422);
+    if (![ReservationStatus.CONFIRMED, ReservationStatus.RESCHEDULED].includes(reservation.status)) {
+      throw new AppException(
+        'RESERVATION_INVALID_TRANSITION',
+        'Only CONFIRMED or RESCHEDULED reservations can be updated via sync',
+        {},
+        422
+      );
     }
 
     const startTime = typeof change.payload.start_time === 'string' ? new Date(change.payload.start_time) : null;
@@ -336,6 +341,16 @@ export class SyncService {
       base_version: number;
     }
   ): Promise<SyncAccepted | SyncConflict> {
+    const rolesForPush = await this.scopePolicyService.getRoles(userId);
+    if (rolesForPush.includes('merchant')) {
+      throw new AppException(
+        'FORBIDDEN',
+        'Follow-up task sync is not available for merchant accounts',
+        { entity_type: SyncEntityType.FOLLOW_UP_TASK },
+        403
+      );
+    }
+
     const task = await this.followUpTaskRepository.findOne({ where: { id: change.entity_id } });
     if (!task) {
       return this.toConflict(change.entity_id, null, 'SYNC_ENTITY_NOT_FOUND');
@@ -358,7 +373,7 @@ export class SyncService {
       throw new AppException('FORBIDDEN', 'Follow-up plan is not accessible', {}, 403);
     }
 
-    const roles = await this.scopePolicyService.getRoles(userId);
+    const roles = rolesForPush;
     const isPatientOwner = plan.patientId === userId;
     const isOpsAdmin = roles.includes('ops_admin');
     const isStaff = roles.includes('staff');
@@ -486,12 +501,21 @@ export class SyncService {
     limit: number
   ): Promise<FollowUpTaskEntity[]> {
     const roles = await this.scopePolicyService.getRoles(userId);
+    if (roles.includes('merchant')) {
+      throw new AppException(
+        'FORBIDDEN',
+        'Follow-up task sync is not available for merchant accounts',
+        { entity_type: SyncEntityType.FOLLOW_UP_TASK },
+        403
+      );
+    }
+
     const isOpsAdmin = roles.includes('ops_admin');
 
     const planQb = this.followUpPlanRepository.createQueryBuilder('p').where('p.deleted_at IS NULL');
     if (!isOpsAdmin) {
       const orClauses: string[] = ['p.patient_id = :userId'];
-      if (roles.includes('staff') || roles.includes('merchant')) {
+      if (roles.includes('staff')) {
         const scopeIds = await this.scopePolicyService.getUserScopeIds(userId);
         if (scopeIds.length > 0) {
           orClauses.push(

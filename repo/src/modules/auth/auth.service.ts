@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, IsNull, Repository } from 'typeorm';
 import { AppException } from '../../common/exceptions/app.exception';
 import { AccessControlService } from '../access-control/access-control.service';
 import { ConfirmPasswordResetDto } from './dto/confirm-password-reset.dto';
@@ -49,6 +49,7 @@ export class AuthService {
     access_token: string;
     expires_in: number;
     session_id: string;
+    refresh_token: string;
   }> {
     if (payload.role !== 'patient') {
       throw new AppException(
@@ -64,36 +65,16 @@ export class AuthService {
       throw new AppException('AUTH_USERNAME_TAKEN', 'Username is already registered', {}, 409);
     }
 
-    const qRaw = (payload.security_question_id ?? '').trim();
-    const aRaw =
-      typeof payload.security_answer === 'string' ? payload.security_answer.trim() : '';
-    const hasQuestion = qRaw.length > 0;
-    const hasAnswer = aRaw.length > 0;
+    const question = await this.securityQuestionRepository.findOne({
+      where: { id: payload.security_question_id.trim(), active: true }
+    });
 
-    if (hasQuestion !== hasAnswer) {
-      throw new AppException(
-        'AUTH_SECURITY_PAIR_INCOMPLETE',
-        'Provide both security_question_id and security_answer, or omit both',
-        {},
-        422
-      );
+    if (!question) {
+      throw new AppException('AUTH_SECURITY_QUESTION_NOT_FOUND', 'Security question not found', {}, 404);
     }
 
-    let questionIdForSave: string | null = null;
-    let answerHashForSave: string | null = null;
-
-    if (hasQuestion && hasAnswer) {
-      const question = await this.securityQuestionRepository.findOne({
-        where: { id: qRaw, active: true }
-      });
-
-      if (!question) {
-        throw new AppException('AUTH_SECURITY_QUESTION_NOT_FOUND', 'Security question not found', {}, 404);
-      }
-
-      questionIdForSave = qRaw;
-      answerHashForSave = await bcrypt.hash(aRaw.toLowerCase(), 10);
-    }
+    const answerHashForSave = await bcrypt.hash(payload.security_answer.trim().toLowerCase(), 10);
+    const questionIdForSave = payload.security_question_id.trim();
 
     const role = await this.accessControlService.findRoleByName(payload.role);
     if (!role) {
@@ -117,16 +98,14 @@ export class AuthService {
         })
       );
 
-      if (questionIdForSave && answerHashForSave) {
-        await queryRunner.manager.save(
-          SecurityAnswerEntity,
-          this.securityAnswerRepository.create({
-            userId: savedUser.id,
-            questionId: questionIdForSave,
-            answerHash: answerHashForSave
-          })
-        );
-      }
+      await queryRunner.manager.save(
+        SecurityAnswerEntity,
+        this.securityAnswerRepository.create({
+          userId: savedUser.id,
+          questionId: questionIdForSave,
+          answerHash: answerHashForSave
+        })
+      );
 
       await this.accessControlService.assignRoleIdsToUser(savedUser.id, [role.id], queryRunner.manager);
 
@@ -153,6 +132,7 @@ export class AuthService {
     access_token: string;
     expires_in: number;
     session_id: string;
+    refresh_token: string;
   }> {
     return this.createAuthenticatedSession(userId);
   }
@@ -161,6 +141,7 @@ export class AuthService {
     access_token?: string;
     expires_in?: number;
     session_id?: string;
+    refresh_token?: string;
     lockout_remaining_seconds?: number;
   }> {
     const user = await this.userRepository.findOne({ where: { username: payload.username } });
@@ -200,12 +181,16 @@ export class AuthService {
     access_token: string;
     expires_in: number;
     session_id: string;
+    refresh_token: string;
   }> {
     const now = new Date();
-    const expiresInSeconds = this.configService.getOrThrow<number>('JWT_EXPIRES_IN_SECONDS');
+    const accessTtlSeconds = this.configService.getOrThrow<number>('JWT_EXPIRES_IN_SECONDS');
+    const refreshTtlSeconds = this.getRefreshTtlSeconds();
     const sessionId = randomUUID();
     const tokenJti = randomUUID();
-    const expiresAt = new Date(now.getTime() + expiresInSeconds * 1000);
+    const refreshPlain = randomBytes(32).toString('hex');
+    const refreshHash = createHash('sha256').update(refreshPlain).digest('hex');
+    const expiresAt = new Date(now.getTime() + refreshTtlSeconds * 1000);
 
     await this.sessionRepository.save(
       this.sessionRepository.create({
@@ -213,6 +198,7 @@ export class AuthService {
         userId,
         tokenJti,
         expiresAt,
+        refreshTokenHash: refreshHash,
         invalidatedAt: null
       })
     );
@@ -225,13 +211,60 @@ export class AuthService {
 
     return {
       access_token: accessToken,
-      expires_in: expiresInSeconds,
-      session_id: sessionId
+      expires_in: accessTtlSeconds,
+      session_id: sessionId,
+      refresh_token: refreshPlain
+    };
+  }
+
+  async refreshTokens(payload: { session_id: string; refresh_token: string }): Promise<{
+    access_token: string;
+    expires_in: number;
+    session_id: string;
+    refresh_token: string;
+  }> {
+    const hash = createHash('sha256').update(payload.refresh_token).digest('hex');
+    const session = await this.sessionRepository.findOne({
+      where: {
+        id: payload.session_id,
+        refreshTokenHash: hash,
+        deletedAt: IsNull()
+      }
+    });
+
+    const now = new Date();
+    if (!session || session.invalidatedAt || session.expiresAt.getTime() <= now.getTime()) {
+      throw new AppException('AUTH_REFRESH_INVALID', 'Refresh token is invalid or expired', {}, 401);
+    }
+
+    const accessTtlSeconds = this.configService.getOrThrow<number>('JWT_EXPIRES_IN_SECONDS');
+    const refreshTtlSeconds = this.getRefreshTtlSeconds();
+    const newJti = randomUUID();
+    const newRefreshPlain = randomBytes(32).toString('hex');
+    const newRefreshHash = createHash('sha256').update(newRefreshPlain).digest('hex');
+
+    session.tokenJti = newJti;
+    session.refreshTokenHash = newRefreshHash;
+    session.expiresAt = new Date(now.getTime() + refreshTtlSeconds * 1000);
+    session.version += 1;
+    await this.sessionRepository.save(session);
+
+    const accessToken = this.jwtService.signAccessToken({
+      sub: session.userId,
+      session_id: session.id,
+      jti: newJti
+    });
+
+    return {
+      access_token: accessToken,
+      expires_in: accessTtlSeconds,
+      session_id: session.id,
+      refresh_token: newRefreshPlain
     };
   }
 
   async logout(sessionId: string): Promise<void> {
-    const session = await this.sessionRepository.findOne({ where: { id: sessionId } });
+    const session = await this.sessionRepository.findOne({ where: { id: sessionId, deletedAt: IsNull() } });
     if (!session || session.invalidatedAt) {
       return;
     }
@@ -373,7 +406,8 @@ export class AuthService {
     const session = await this.sessionRepository.findOne({
       where: {
         id: payload.session_id,
-        tokenJti: payload.jti
+        tokenJti: payload.jti,
+        deletedAt: IsNull()
       }
     });
 
@@ -386,6 +420,14 @@ export class AuthService {
       sessionId: payload.session_id,
       jti: payload.jti
     };
+  }
+
+  private getRefreshTtlSeconds(): number {
+    const raw = this.configService.get<number>('JWT_REFRESH_EXPIRES_IN_SECONDS');
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 300) {
+      return Math.floor(raw);
+    }
+    return 604800;
   }
 
   private getLoginLockMinutes(): number {

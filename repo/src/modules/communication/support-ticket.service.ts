@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { AppException } from '../../common/exceptions/app.exception';
 import { AuditService } from '../audit/audit.service';
+import { AccessBasis, buildPrivilegedAuditPayload } from '../audit/privileged-audit.builder';
 import { ReservationService } from '../reservation/reservation.service';
 import { ScopePolicyService } from '../access-control/scope-policy.service';
 import { NotificationService } from './notification.service';
@@ -40,16 +41,20 @@ export class SupportTicketService {
       })
     );
 
-    await this.auditService.appendLog({
-      entityType: 'support_ticket',
-      entityId: ticket.id,
-      action: 'support.ticket.create',
-      actorId: userId,
-      payload: {
-        reservation_id: payload.reservation_id,
-        category: payload.category
-      }
-    });
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'support_ticket',
+          entityId: ticket.id,
+          action: 'support.ticket.create',
+          actorId: userId,
+          accessBasis: 'self',
+          filters: { reservation_id: payload.reservation_id },
+          outcome: 'success'
+        },
+        { category: payload.category }
+      )
+    );
 
     return this.mapSupportTicket(ticket);
   }
@@ -83,17 +88,25 @@ export class SupportTicketService {
     ticket.version += 1;
     const saved = await this.supportTicketRepository.save(ticket);
 
-    await this.auditService.appendLog({
-      entityType: 'support_ticket',
-      entityId: saved.id,
-      action: 'support.ticket.escalate',
-      actorId: userId,
-      payload: {
-        reservation_id: saved.reservationId,
-        owner_user_id: saved.ownerUserId,
-        reason: payload.reason ?? null
-      }
-    });
+    const escalateBasis: AccessBasis = isOwner
+      ? 'self'
+      : roles.includes('ops_admin')
+        ? 'ops_admin'
+        : 'staff';
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'support_ticket',
+          entityId: saved.id,
+          action: 'support.ticket.escalate',
+          actorId: userId,
+          accessBasis: escalateBasis,
+          filters: { reservation_id: saved.reservationId },
+          outcome: 'success'
+        },
+        { owner_user_id: saved.ownerUserId, reason: payload.reason ?? null }
+      )
+    );
 
     await this.notificationService.notifyTicketOwner(saved.ownerUserId, userId, 'support_ticket_escalated', 'Support ticket escalated', {
       ticket_id: saved.id,
@@ -130,17 +143,21 @@ export class SupportTicketService {
     ticket.version += 1;
     const saved = await this.supportTicketRepository.save(ticket);
 
-    await this.auditService.appendLog({
-      entityType: 'support_ticket',
-      entityId: saved.id,
-      action: 'support.ticket.resolve',
-      actorId: userId,
-      payload: {
-        reservation_id: saved.reservationId,
-        previous_status: previousStatus,
-        resolution_note: payload.resolution_note ?? null
-      }
-    });
+    const resolveBasis: AccessBasis = roles.includes('ops_admin') ? 'ops_admin' : 'staff';
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'support_ticket',
+          entityId: saved.id,
+          action: 'support.ticket.resolve',
+          actorId: userId,
+          accessBasis: resolveBasis,
+          filters: { reservation_id: saved.reservationId },
+          outcome: 'success'
+        },
+        { previous_status: previousStatus, resolution_note: payload.resolution_note ?? null }
+      )
+    );
 
     await this.notificationService.notifyTicketOwner(saved.ownerUserId, userId, 'support_ticket_resolved', 'Support ticket resolved', {
       ticket_id: saved.id,
@@ -172,16 +189,21 @@ export class SupportTicketService {
     ticket.version += 1;
     const saved = await this.supportTicketRepository.save(ticket);
 
-    await this.auditService.appendLog({
-      entityType: 'support_ticket',
-      entityId: saved.id,
-      action: 'support.ticket.close',
-      actorId: userId,
-      payload: {
-        reservation_id: saved.reservationId,
-        close_note: payload.close_note ?? null
-      }
-    });
+    const closeBasis: AccessBasis = roles.includes('ops_admin') ? 'ops_admin' : 'staff';
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload(
+        {
+          entityType: 'support_ticket',
+          entityId: saved.id,
+          action: 'support.ticket.close',
+          actorId: userId,
+          accessBasis: closeBasis,
+          filters: { reservation_id: saved.reservationId },
+          outcome: 'success'
+        },
+        { close_note: payload.close_note ?? null }
+      )
+    );
 
     await this.notificationService.notifyTicketOwner(saved.ownerUserId, userId, 'support_ticket_closed', 'Support ticket closed', {
       ticket_id: saved.id,
@@ -228,6 +250,27 @@ export class SupportTicketService {
     qb.skip((query.page - 1) * query.page_size).take(query.page_size);
 
     const [items, total] = await qb.getManyAndCount();
+
+    await this.auditService.appendLog(
+      buildPrivilegedAuditPayload({
+        action: 'support.ticket.list',
+        actorId: userId,
+        entityType: 'support_ticket',
+        entityId: null,
+        accessBasis: roles.includes('ops_admin')
+          ? 'ops_admin'
+          : roles.includes('staff')
+            ? 'staff'
+            : 'self',
+        filters: {
+          ...(query.status ? { status: query.status } : {}),
+          ...(query.reservation_id ? { reservation_id: query.reservation_id } : {}),
+          result_total: total
+        },
+        outcome: 'success'
+      })
+    );
+
     return {
       items: items.map((item) => ({
         ...this.mapSupportTicket(item)

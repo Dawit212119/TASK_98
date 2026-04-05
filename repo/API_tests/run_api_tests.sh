@@ -257,7 +257,15 @@ STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/auth
   -H "Idempotency-Key: reg-$SUFFIX-no-security" \
   -d "{\"username\":\"apitest-nosec-$SUFFIX\",\"password\":\"$PASSWORD\",\"role\":\"patient\"}")"
 BODY="$(cat "$BODY_FILE")"
-assert_case "register patient without security Q and A" "$STATUS" "201" "$BODY" "user_id"
+assert_case "register patient without security Q and A rejected" "$STATUS" "400" "$BODY" "VALIDATION_ERROR"
+
+BODY_FILE="$TMP_DIR/register_weak_password.json"
+STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/auth/register" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: reg-$SUFFIX-weak-pw" \
+  -d "{\"username\":\"apitest-weakpw-$SUFFIX\",\"password\":\"password\",\"role\":\"patient\",\"security_question_id\":\"$SECURITY_QUESTION_ID\",\"security_answer\":\"x\"}")"
+BODY="$(cat "$BODY_FILE")"
+assert_case "register rejects weak password" "$STATUS" "400" "$BODY" "VALIDATION_ERROR"
 
 BODY_FILE="$TMP_DIR/register_security_pair_incomplete.json"
 STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/auth/register" \
@@ -265,7 +273,7 @@ STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/auth
   -H "Idempotency-Key: reg-$SUFFIX-partial-security" \
   -d "{\"username\":\"apitest-partialsec-$SUFFIX\",\"password\":\"$PASSWORD\",\"role\":\"patient\",\"security_question_id\":\"$SECURITY_QUESTION_ID\"}")"
 BODY="$(cat "$BODY_FILE")"
-assert_case "register rejects security question without answer" "$STATUS" "422" "$BODY" "AUTH_SECURITY_PAIR_INCOMPLETE"
+assert_case "register rejects security question without answer" "$STATUS" "400" "$BODY" "VALIDATION_ERROR"
 
 BODY_FILE="$TMP_DIR/register_staff_public.json"
 STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/auth/register" \
@@ -317,6 +325,35 @@ STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/auth
   -d "{\"username\":\"$PATIENT1\",\"password\":\"$PASSWORD\"}")"
 BODY="$(cat "$BODY_FILE")"
 assert_case "login patient user" "$STATUS" "200" "$BODY" "access_token"
+
+PATIENT1_LOGIN_BODY="$BODY_FILE"
+PATIENT1_TOKEN="$("$NODE_BIN" -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(d.access_token||'');" < "$BODY_FILE")"
+
+# 5b) Token refresh (rotates refresh_token; new access_token)
+# Pass paths as argv (Windows node.exe often does not inherit LOGIN_PATH/REQ_OUT from Git Bash).
+PATIENT1_REFRESH_REQ="$TMP_DIR/refresh_req_patient1.json"
+LOGIN_NODE_PATH="$(to_node_file_path "$PATIENT1_LOGIN_BODY")"
+REFRESH_NODE_PATH="$(to_node_file_path "$PATIENT1_REFRESH_REQ")"
+"$NODE_BIN" -e "
+const fs = require('fs');
+const loginPath = process.argv[1];
+const reqOut = process.argv[2];
+const login = JSON.parse(fs.readFileSync(loginPath, 'utf8'));
+if (!login.session_id || !login.refresh_token) {
+  console.error('login response missing session_id or refresh_token');
+  process.exit(1);
+}
+fs.writeFileSync(
+  reqOut,
+  JSON.stringify({ session_id: login.session_id, refresh_token: login.refresh_token })
+);
+" "$LOGIN_NODE_PATH" "$REFRESH_NODE_PATH"
+BODY_FILE="$TMP_DIR/auth_refresh_patient1.json"
+STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/auth/refresh" \
+  -H "Content-Type: application/json" \
+  -d @"$PATIENT1_REFRESH_REQ")"
+BODY="$(cat "$BODY_FILE")"
+assert_case "auth refresh returns new access_token" "$STATUS" "200" "$BODY" "access_token"
 
 PATIENT1_TOKEN="$("$NODE_BIN" -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(d.access_token||'');" < "$BODY_FILE")"
 
@@ -505,14 +542,14 @@ STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -G "$API_BASE_URL/reservati
 BODY="$(cat "$BODY_FILE")"
 assert_case "merchant list reservations succeeds (clinic scope-filtered)" "$STATUS" "200" "$BODY" "items"
 
-BODY_FILE="$TMP_DIR/followup_ingest_merchant_ok.json"
+BODY_FILE="$TMP_DIR/followup_ingest_merchant_forbidden.json"
 STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/follow-up/tags/ingest" \
   -H "Authorization: Bearer $MERCHANT_TOKEN" \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: followup-merchant-$SUFFIX-ok" \
+  -H "Idempotency-Key: followup-merchant-$SUFFIX-forbidden" \
   -d "{\"reservation_id\":\"$RESERVATION_ID\",\"tags\":[{\"key\":\"billing\",\"value\":\"synced\",\"source\":\"merchant\"}]}")"
 BODY="$(cat "$BODY_FILE")"
-assert_case "merchant follow-up tag ingest in clinic scope" "$STATUS" "201" "$BODY" "tag_id"
+assert_case "merchant follow-up tag ingest forbidden (clinical roles only)" "$STATUS" "403" "$BODY" "FORBIDDEN"
 
 BODY_FILE="$TMP_DIR/provision_analytics.json"
 STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/access/provision-user" \
@@ -821,6 +858,24 @@ STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/foll
 BODY="$(cat "$BODY_FILE")"
 assert_case "follow-up template allowed for provider" "$STATUS" "201" "$BODY" "template_id"
 FOLLOWUP_TEMPLATE_ID="$("$NODE_BIN" -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(d.template_id||'');" < "$BODY_FILE")"
+
+BODY_FILE="$TMP_DIR/followup_template_auto_ingest.json"
+STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/follow-up/plan-templates" \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: followup-template-$SUFFIX-auto-ingest" \
+  -d '{"name":"auto by ingest e2e","trigger_tags":[{"key":"auto_by_ingest","value":"v1"}],"task_rules":[{"task_name":"ingest-task","every_n_days":14}],"active":true}')"
+BODY="$(cat "$BODY_FILE")"
+assert_case "follow-up auto-ingest template create" "$STATUS" "201" "$BODY" "template_id"
+
+BODY_FILE="$TMP_DIR/followup_ingest_triggers_plan.json"
+STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/follow-up/tags/ingest" \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: followup-ingest-$SUFFIX-auto-plan" \
+  -d "{\"reservation_id\":\"$PROVIDER_SCOPED_RESERVATION_ID\",\"tags\":[{\"key\":\"auto_by_ingest\",\"value\":\"v1\",\"source\":\"e2e\"}]}")"
+BODY="$(cat "$BODY_FILE")"
+assert_case "follow-up ingest auto-creates plan when tags match template" "$STATUS" "201" "$BODY" '"auto_created_plan_ids":["'
 
 BODY_FILE="$TMP_DIR/followup_plan_create_allowed_provider.json"
 STATUS="$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST "$API_BASE_URL/follow-up/plans" \

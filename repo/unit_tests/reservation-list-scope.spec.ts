@@ -52,16 +52,18 @@ describe('ReservationService listReservations scope', () => {
       })
     };
 
+    const auditService = { appendLog: jest.fn(async () => ({ id: 'audit-1' })) };
+
     const service = new ReservationService(
       { createQueryRunner: jest.fn() } as any,
       scopePolicyService as any,
-      {} as any,
+      auditService as any,
       reservationRepository as any,
       {} as any,
       {} as any
     );
 
-    return { service, andWhereCalls, qb };
+    return { service, andWhereCalls, qb, auditService };
   };
 
   it('allows merchant-only role to list with clinic-scope filter applied', async () => {
