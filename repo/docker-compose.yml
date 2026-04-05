@@ -47,6 +47,9 @@ services:
       WORKFLOW_SLA_USE_CLOCK_HOURS: ${WORKFLOW_SLA_USE_CLOCK_HOURS:-false}
       WORKFLOW_REMINDER_LEAD_HOURS: ${WORKFLOW_REMINDER_LEAD_HOURS:-2}
       AUDIT_RETENTION_YEARS: ${AUDIT_RETENTION_YEARS:-7}
+      # Seed dev_ops_admin for migrations + API tests (password: DevOpsAdmin123! per README)
+      BOOTSTRAP_OPS_USERNAME: ${BOOTSTRAP_OPS_USERNAME:-dev_ops_admin}
+      BOOTSTRAP_OPS_PASSWORD_HASH: ${BOOTSTRAP_OPS_PASSWORD_HASH:-$$2a$$10$$V8usYaFEDiOQ/K96AyrVc.Q/z.cABCkYfOv2vy67xiMB0nwoY2w9.}
     depends_on:
       postgres:
         condition: service_healthy
