@@ -1,5 +1,8 @@
 node_modules/
 dist/
+
+# Local OpenCode tooling (may contain API keys)
+.opencode/
 .env
 coverage/
 npm-debug.log*
