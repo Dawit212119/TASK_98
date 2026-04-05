@@ -3,7 +3,6 @@ dist/
 
 # Local OpenCode tooling (may contain API keys)
 .opencode/
-.env
 coverage/
 npm-debug.log*
 .api-test-tmp*/
@@ -12,3 +11,6 @@ npm-debug.log*
 convert_ai_session.py
 session.json
 e6c5dd6c-d4eb-4807-a421-91a486f01662.jsonl
+config.bat
+temp_auto_push.bat
+temp_interactive_push.bat
